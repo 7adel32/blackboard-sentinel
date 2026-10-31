@@ -24,10 +24,14 @@ import http.cookiejar
 from datetime import datetime, timezone, timedelta
 
 # Configuration
-LMS_URL = os.getenv("LMS_URL", "https://lms.ut.edu.sa")
+LMS_URL = os.getenv("LMS_URL", "").rstrip("/")
 USER_ID = os.getenv("LMS_USER_ID", "")
 PASSWORD = os.getenv("LMS_PASSWORD", "")
 STUDENT_USER_ID = os.getenv("LMS_STUDENT_ID", "")
+
+if not LMS_URL or not USER_ID or not PASSWORD:
+    print("Error: LMS_URL, LMS_USER_ID, and LMS_PASSWORD must be set in ~/.hermes/.env or environment.", file=sys.stderr)
+    sys.exit(1)
 
 STATE_DIR = os.path.expanduser("~/.hermes/state")
 STATE_FILE = os.path.join(STATE_DIR, "lms_tracker_state.json")

@@ -15,22 +15,31 @@ mkdir -p "${HERMES_DIR}/state"
 mkdir -p "${HERMES_DIR}/logs"
 touch "${ENV_FILE}"
 
-# 1. Prompt for credentials
+# 1. Prompt for university portal URL and credentials
 CURRENT_USER=$(grep -E "^LMS_USER_ID=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
 
 if [ -z "${CURRENT_USER}" ]; then
-    echo "Please enter your LMS credentials:"
-    read -p "Username / Student ID (e.g. 481000670): " INPUT_USER
+    echo "Please configure your University Blackboard Portal:"
+    echo "Enter your university's LMS Base URL (the website where you enter your username and password):"
+    read -p "LMS Base URL (e.g. https://lms.university.edu): " INPUT_URL
+    while [ -z "${INPUT_URL}" ]; do
+        echo "LMS URL cannot be empty."
+        read -p "LMS Base URL (e.g. https://lms.university.edu): " INPUT_URL
+    done
+    # Strip trailing slash if present
+    INPUT_URL="${INPUT_URL%/}"
+
+    echo ""
+    echo "Enter your login credentials:"
+    read -p "Username / Student ID: " INPUT_USER
     read -s -p "Password: " INPUT_PASS
     echo ""
-    read -p "LMS Base URL [default: https://lms.ut.edu.sa]: " INPUT_URL
-    INPUT_URL=${INPUT_URL:-https://lms.ut.edu.sa}
 
     echo "" >> "${ENV_FILE}"
     echo "# University LMS Credentials" >> "${ENV_FILE}"
+    echo "LMS_URL=\"${INPUT_URL}\"" >> "${ENV_FILE}"
     echo "LMS_USER_ID=\"${INPUT_USER}\"" >> "${ENV_FILE}"
     echo "LMS_PASSWORD=\"${INPUT_PASS}\"" >> "${ENV_FILE}"
-    echo "LMS_URL=\"${INPUT_URL}\"" >> "${ENV_FILE}"
     echo "-> Saved credentials securely to ~/.hermes/.env"
 else
     echo "-> Found existing LMS credentials for ${CURRENT_USER} in ~/.hermes/.env"

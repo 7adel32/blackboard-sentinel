@@ -65,8 +65,8 @@ The installer will prompt you for your student credentials and preferred storage
    ```
    Edit `.env` with your login details:
    ```env
-   LMS_URL="https://lms.ut.edu.sa"        # Replace with your university's LMS URL
-   LMS_USER_ID="481000000"                # Your student username / ID
+   LMS_URL="https://lms.university.edu"   # The website you enter your username and password into
+   LMS_USER_ID="your_student_id"          # Your student username / ID
    LMS_PASSWORD="your_password"           # Your LMS password
    LMS_STORAGE_DIR="~/Documents/University" # Where course files should be stored
    ```
@@ -95,7 +95,7 @@ The installer will prompt you for your student credentials and preferred storage
 
 | Environment Variable | Description | Default |
 | :--- | :--- | :--- |
-| `LMS_URL` | Base URL of your Blackboard portal | `https://lms.ut.edu.sa` |
+| `LMS_URL` | Base URL of your Blackboard portal (e.g. `https://lms.university.edu`) | *Required* |
 | `LMS_USER_ID` | Student login username or ID number | *Required* |
 | `LMS_PASSWORD` | Student login password | *Required* |
 | `LMS_STORAGE_DIR` | Local root directory for downloaded course materials | `~/Documents/University` |

@@ -1,2 +1,1 @@
 # Blackboard Sentinel requires Python 3.10+ standard library.
-# No external dependencies (pure urllib / json / re / http.cookiejar).

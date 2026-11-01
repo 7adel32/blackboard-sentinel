@@ -67,15 +67,24 @@ blackboard-sentinel/
 
 ## Tray Icon & Dynamic States
 
-The Windows Tray App uses a pure white silhouette vector base (`assets/icon_base.png`) and applies real-time GPU/CPU alpha tinting:
+Blackboard Sentinel runs quietly in your notification area as an active status indicator with real-time breathing animations:
 
-| State | Appearance | Behavior |
-| :--- | :--- | :--- |
-| **synced** | Monochrome White (`#FFFFFF`) | Idle and up to date. Matches native Windows 11 system icons. |
-| **working** | Animated Pulse (Sky Blue <-> White) | Actively querying Blackboard, syncing files, or checking grades. |
-| **not_configured** | Warm Amber (`#F59E0B`) | Missing credentials or `.env` configuration file. |
-| **error** | Crimson Red (`#EF4444`) | Connection timeout, network loss, or invalid login credentials. |
-| **new_notification** | 1-Second Pulse (Emerald Gold Flash) | Plays a 1.0-second alert pulse animation and triggers native Windows Toast notifications when updates are detected. |
+<p align="center">
+  <img src="assets/tray_animations.gif" alt="Blackboard Sentinel Tray Animations" width="100%" />
+</p>
+
+---
+
+## Interface & Configuration
+
+<p align="center">
+  <img src="assets/screenshot_setup.png" alt="Blackboard Sentinel Configuration" width="58%" />
+  &nbsp;&nbsp;
+  <img src="assets/screenshot_tray_menu.png" alt="Windows Tray Quick Menu" width="38%" />
+</p>
+
+- **Setup & Configuration**: A clean, 2-step dark GUI with portal connection testing, course discovery, and automatic `.env` credential storage.
+- **System Tray Quick Menu**: Single-clicking the tray icon immediately opens your local course folder in File Explorer. Right-clicking accesses manual sync, upcoming deadlines, grades viewer, settings, and exit.
 
 ---
 

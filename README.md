@@ -14,9 +14,12 @@ Monitors university courses in the background, automatically organizes downloade
   - Inspects assignment instructions and tests (`data-bbfile` JSON payloads) to extract homework files and project briefs that naive scrapers miss.
 - **Authoritative Deadline Tracking**: Merges Blackboard calendar items with the gradebook's authoritative `grading.due` column, clamping requests to avoid API date-window drops.
 - **Grade & Feedback Sentinel**: Tracks grade releases, score updates, status transitions (`NeedsGrading` -> `Graded`), and instructor feedback comments.
+- **Minimal Resource Footprint**:
+  - **Windows Tray App**: Sits idle in the notification area at only ~25–35 MB RAM.
+  - **Hermes Agent & Linux**: **0 MB** idle RAM (runs on-demand via `hermes cron`, taking ~18 MB for 3–5 seconds during checks and terminating immediately).
 - **Zero-Quota & Silent**: Operates purely with standard Python HTTP requests. Dispatches notifications only when updates are found; silent when nothing changes.
 - **Cross-Platform**:
-  - **Windows System Tray App**: Sits in notification area with dynamic state tinting, real-time animation, and quick-action menu.
+  - **Windows System Tray App**: Sits in notification area as a real-time status indicator with dynamic state tinting, waiting animation, and quick-action menu.
   - **Windows Headless Background Task**: Runs silently via Windows Task Scheduler with zero RAM footprint when idle.
   - **Hermes Agent & Linux**: 24/7 background scheduler (`hermes cron`) inside WSL/Ubuntu with Telegram push notifications.
   - **Standalone CLI**: Runs on-demand from any terminal.
@@ -72,12 +75,6 @@ The Windows Tray App uses a pure white silhouette vector base (`assets/icon_base
 
 2. **Run the Installer**:
    Double-click `BlackboardSentinelSetup.exe` and click **Install / Update**.
-
-The installer automatically:
-- Safely closes any older running instances to prevent file lock collisions.
-- Installs the standalone program and uninstaller to `%LOCALAPPDATA%\Programs\BlackboardSentinel\`.
-- Registers **Blackboard Sentinel** in **Windows "Installed apps" / "Add or remove programs"**.
-- Creates **Start Menu** and **Windows Startup** shortcuts so the sentinel launches quietly in your system tray on login.
 
 *(Alternative: install from source via PowerShell)*:
 ```powershell

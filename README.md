@@ -67,22 +67,27 @@ The Windows Tray App uses a pure white silhouette vector base (`assets/icon_base
 
 ### 1. Windows Installation
 
-Run the interactive PowerShell installer or use the standalone executable:
+1. **Download the Setup Executable**:
+   Download **`BlackboardSentinelSetup.exe`** from the [Latest Release](https://github.com/7adel32/blackboard-sentinel/releases/latest).
+
+2. **Run the Installer**:
+   Double-click `BlackboardSentinelSetup.exe` and click **Install / Update**.
+
+The installer automatically:
+- Safely closes any older running instances to prevent file lock collisions.
+- Installs the standalone program and uninstaller to `%LOCALAPPDATA%\Programs\BlackboardSentinel\`.
+- Registers **Blackboard Sentinel** in **Windows "Installed apps" / "Add or remove programs"**.
+- Creates **Start Menu** and **Windows Startup** shortcuts so the sentinel launches quietly in your system tray on login.
+
+*(Alternative: install from source via PowerShell)*:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-The installer:
-1. Installs the program into the standard Windows per-user applications folder:
-   `%LOCALAPPDATA%\Programs\BlackboardSentinel\`
-2. Places both `BlackboardSentinel.exe` and the dedicated `uninstall.exe` in the application folder.
-3. Registers **Blackboard Sentinel** in **Windows "Installed apps" / "Add or remove programs"**.
-4. Creates Start Menu and Windows Startup shortcuts.
-
 To uninstall:
 - Go to Windows **Settings -> Apps -> Installed apps -> Blackboard Sentinel -> Uninstall**, or
-- Run `uninstall.exe` from the program directory or Start Menu, or
-- Run `powershell -ExecutionPolicy Bypass -File .\uninstall.ps1`
+- Run **Uninstall Blackboard Sentinel** from your Start Menu, or
+- Run `uninstall.exe` directly from `%LOCALAPPDATA%\Programs\BlackboardSentinel\`
 
 ---
 

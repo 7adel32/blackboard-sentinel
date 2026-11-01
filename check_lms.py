@@ -192,8 +192,10 @@ AST_TZ = timezone(timedelta(hours=3))
 def send_to_chat(text, platform=None):
     if not text:
         return
-    # Output to stdout so Hermes cron jobs (--deliver origin) automatically deliver to origin
-    print(text)
+    # When running directly inside a Hermes cron job, stdout is captured and delivered automatically to origin.
+    # Out-of-band callers or standalone executions dispatch directly via hermes send:
+    if os.getenv("HERMES_JOB_ID"):
+        return
 
     target_platform = platform or os.getenv("HERMES_CHAT_PLATFORM", "whatsapp").strip().lower()
 
@@ -601,6 +603,34 @@ def is_request_item(item, parent_title=""):
     # 2. Content item / file / folder with request keywords in title
     if any(re.search(pat, title_norm) for pat in REQUEST_KEYWORDS):
         return True
+
+    return False
+
+
+def is_request_announcement(title, body="", attached_files=None):
+    """Determine if an announcement represents an actionable assignment, homework, task, exercise, or project."""
+    title_clean = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", title or "").strip()
+    title_norm = re.sub(r"[_\-.]+", " ", title_clean.lower())
+    body_clean = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", body or "").strip()
+    body_norm = re.sub(r"[_\-.]+", " ", body_clean.lower())
+
+    if any(re.search(pat, title_norm) for pat in EXCLUDE_KEYWORDS):
+        return False
+
+    if any(re.search(pat, title_norm) for pat in REQUEST_KEYWORDS):
+        return True
+
+    for pat in REQUEST_KEYWORDS:
+        if re.search(pat, body_norm):
+            return True
+
+    if attached_files:
+        for af in attached_files:
+            af_name = (af.get("filename") or "") if isinstance(af, dict) else str(af)
+            af_clean = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", af_name).strip()
+            af_norm = re.sub(r"[_\-.]+", " ", af_clean.lower())
+            if any(re.search(pat, af_norm) for pat in REQUEST_KEYWORDS):
+                return True
 
     return False
 
@@ -1176,7 +1206,7 @@ def save_announcement_doc(dest_path, ann_title, ann_date, ann_body, course_name,
             pass
 
 
-def check_announcements(client, cid, info, state):
+def check_announcements(client, cid, info, state, new_requests=None):
     new_announcements = []
     seen = set(state.get("seen_announcements", []))
 
@@ -1237,7 +1267,10 @@ def check_announcements(client, cid, info, state):
                 target_fname = sanitize_filename(af["filename"] or "attachment")
                 target_path = os.path.join(ann_dir, target_fname)
                 if not os.path.exists(target_path):
-                    client.download_file(af["url"], target_path)
+                    try:
+                        client.download_file(af["url"], target_path)
+                    except Exception as e:
+                        sys.stderr.write(f"Error downloading announcement attachment {target_fname}: {e}\n")
 
             # Save external URLs as .url internet shortcuts into Announcements/
             for l_item in links:
@@ -1250,6 +1283,78 @@ def check_announcements(client, cid, info, state):
                             sf.write(f"[InternetShortcut]\r\nURL={l_url}\r\n")
                     except Exception:
                         pass
+
+        # Check if announcement qualifies as an actionable request (homework, assignment, project, task, exercise)
+        if is_request_announcement(raw_title, body_clean, attached_files):
+            req_key = f"ann_{cid}_{ann_id}"
+            seen_requests_set = set(state.get("seen_requests", []))
+            if req_key not in seen_requests_set:
+                req_folder_name = get_request_folder_name(raw_title)
+                req_dir = os.path.join(base_dir, req_folder_name)
+                os.makedirs(req_dir, exist_ok=True)
+
+                import shutil
+                doc_path_src = os.path.join(base_dir, "Announcements", f"{clean_title}.docx")
+                if os.path.exists(doc_path_src):
+                    try:
+                        shutil.copy2(doc_path_src, os.path.join(req_dir, f"{clean_title}.docx"))
+                    except Exception:
+                        pass
+
+                req_files = []
+                ann_dir_src = os.path.join(base_dir, "Announcements")
+                for af in attached_files:
+                    af_fname = sanitize_filename(af.get("filename") or "attachment")
+                    src_af = os.path.join(ann_dir_src, af_fname)
+                    dst_af = os.path.join(req_dir, af_fname)
+                    if os.path.exists(src_af):
+                        try:
+                            shutil.copy2(src_af, dst_af)
+                        except Exception:
+                            pass
+                    if af_fname not in req_files:
+                        req_files.append(af_fname)
+
+                doc_fname = f"{clean_title}.docx"
+                if doc_fname not in req_files and os.path.exists(os.path.join(req_dir, doc_fname)):
+                    req_files.insert(0, doc_fname)
+
+                inst_md_path = os.path.join(req_dir, "blackboard_instructions.md")
+                with open(inst_md_path, "w", encoding="utf-8") as f:
+                    f.write(f"# {raw_title}\n\n")
+                    f.write(f"- **Course**: {info['name']} ({info['code']})\n")
+                    f.write(f"- **Instructor**: {info['doctor']}\n")
+                    if formatted_date:
+                        f.write(f"- **Posted**: {formatted_date}\n")
+                    f.write("- **Source**: Course Announcement\n")
+                    if req_files:
+                        f.write(f"- **Files**: {', '.join(req_files)}\n")
+                    f.write("\n## Blackboard Announcement Instructions\n\n")
+                    f.write(body_clean if body_clean else "*(No inline text; refer to the attached files in this folder.)*\n")
+
+                seen_requests_set.add(req_key)
+                state["seen_requests"] = list(seen_requests_set)
+
+                ann_req = {
+                    "req_key": req_key,
+                    "cid": cid,
+                    "item_id": ann_id,
+                    "course_name": info["name"],
+                    "course_code": info["code"],
+                    "doctor": info["doctor"],
+                    "raw_title": re.sub(r'[\u200e\u200f\u202a-\u202e]', "", raw_title).strip(),
+                    "req_folder_name": req_folder_name,
+                    "req_dir": req_dir,
+                    "created": created_raw,
+                    "is_new": True,
+                    "instructions_parts": [body_clean] if body_clean else [],
+                    "instructions_text": body_clean,
+                    "files": req_files,
+                    "llm_dir": os.path.join(req_dir, "Solution"),
+                    "source_type": "announcement"
+                }
+                if new_requests is not None:
+                    new_requests.append(ann_req)
 
         if not ann_id or ann_id in seen:
             continue
@@ -1372,7 +1477,7 @@ def main():
         all_downloads.extend(dl)
         all_new_requests.extend(new_reqs)
         all_external_links.extend(ext_links)
-        ann = check_announcements(client, cid, info, state)
+        ann = check_announcements(client, cid, info, state, new_requests=all_new_requests)
         all_announcements.extend(ann)
 
     all_grades = check_grades(client, state, courses_map=courses_dict)

@@ -123,9 +123,29 @@ def get_deadlines():
     return upcoming
 
 
+def send_to_chat(text, platform=None):
+    if not text:
+        return
+    target_platform = platform or os.getenv("HERMES_CHAT_PLATFORM", "whatsapp").strip().lower()
+    try:
+        cmd = ["hermes", "send", "--to", target_platform, text]
+        res = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0:
+            return
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            cmd = ["wsl.exe", "-e", "hermes", "send", "--to", target_platform, text]
+            subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="View upcoming LMS deadlines on-demand.")
-    parser.add_argument("--telegram", "-t", action="store_true", help="Also send output to Telegram.")
+    parser.add_argument("--notify", "-n", "-t", "--telegram", "--chat", action="store_true", help="Push notification to messaging chat (default: whatsapp).")
+    parser.add_argument("--to", default=os.getenv("HERMES_CHAT_PLATFORM", "whatsapp"), help="Target messaging platform (default: whatsapp).")
     args = parser.parse_args()
 
     items = get_deadlines()
@@ -145,8 +165,8 @@ def main():
 
     print(out)
 
-    if args.telegram:
-        subprocess.run(["hermes", "send", "--to", "telegram", out], check=False)
+    if args.notify:
+        send_to_chat(out, platform=args.to)
 
 
 if __name__ == "__main__":

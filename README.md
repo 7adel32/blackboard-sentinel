@@ -2,7 +2,7 @@
 
 An automated course synchronizer and tracker for **Blackboard Learn Ultra** portals.
 
-Monitors university courses in the background, automatically organizes downloaded slides/materials and assignment files into clean subject folders, and alerts you via instant messaging (Hermes Agent / Telegram) and native Windows toast notifications when new grades, announcements, materials, or upcoming deadlines appear.
+Monitors university courses in the background, automatically organizes downloaded slides/materials and assignment files into clean subject folders, and alerts you via instant messaging (Hermes Agent / WhatsApp) and native Windows toast notifications when new grades, announcements, materials, or upcoming deadlines appear.
 
 ---
 
@@ -20,7 +20,7 @@ Monitors university courses in the background, automatically organizes downloade
 - **Zero-Quota & Silent**: Operates purely with standard Python HTTP requests. Dispatches notifications when updates are found.
   - **Windows System Tray App**: Sits in notification area as a real-time status indicator with dynamic state tinting, waiting animation, and quick-action menu.
   - **Windows Headless Background Task**: Runs silently via Windows Task Scheduler with zero RAM footprint when idle.
-  - **Hermes Agent & Linux**: 24/7 background scheduler (`hermes cron`) inside WSL/Ubuntu with Telegram push notifications.
+  - **Hermes Agent & Linux**: 24/7 background scheduler (`hermes cron`) inside WSL/Ubuntu with chat push notifications (WhatsApp / origin routing).
   - **Standalone CLI**: Runs on-demand from any terminal.
 
 ---
@@ -32,7 +32,7 @@ All timings reflect real, end-to-end measurements taken on live Blackboard REST 
 | Operation | Typical Duration | Details |
 | :--- | :--- | :--- |
 | **Routine Check (Nothing Changed)** | **~25 – 35s** | Authenticates, queries enrolled courses, recursively walks folder trees for newly published items, checks all gradebook columns & instructor feedback, and validates deadlines against local cache. |
-| **Delta Check (Changes Detected)** | **~30 – 45s** | Traverses course trees, downloads newly posted slides/attachments into `Announcements/` or course folders, converts announcements to `.docx`, and dispatches Windows notifications and WhatsApp/Telegram alerts. |
+| **Delta Check (Changes Detected)** | **~30 – 45s** | Traverses course trees, downloads newly posted slides/attachments into `Announcements/` or course folders, converts announcements to `.docx`, and dispatches Windows notifications and WhatsApp chat alerts. |
 | **First-Time Run (Cold Start)** | **~45 – 90s** | Initial authentication, dynamic course discovery, folder structure mirroring on disk, and bulk download of all existing course materials, assignments, and announcements. |
 | **Quick CLI Helper (`lms_deadlines` / `lms_grades`)** | **~1.5 – 4.5s** | Targeted single-endpoint queries directly fetching upcoming deadlines (~1.5s) or gradebook entries (~4.3s) without recursive content tree walks. |
 
@@ -156,9 +156,9 @@ For headless servers, Linux, or command-line usage without the desktop tray:
 
 ---
 
-## 24/7 Telegram Notifications via Hermes Agent (Optional)
+## 24/7 Chat & Mobile Notifications via Hermes Agent (Optional)
 
-If you run [Hermes Agent](https://github.com/NousResearch/hermes-agent) on Linux or WSL with Telegram configured, you can run Sentinel as an automated 24/7 background watchdog:
+If you run [Hermes Agent](https://github.com/NousResearch/hermes-agent) on Linux or WSL with messaging configured (e.g. WhatsApp), you can run Sentinel as an automated 24/7 background watchdog:
 
 ```bash
 chmod +x install.sh && ./install.sh
@@ -168,7 +168,7 @@ The installer:
 1. Prompts for credentials (or reads existing `.env` from `~/.hermes/.env`).
 2. Copies sentinel scripts to `~/.hermes/scripts/`.
 3. Installs the `university-portal` skill to `~/.hermes/skills/`.
-4. Automatically registers an hourly cron job (`lms-sentinel`) with origin Telegram delivery.
+4. Automatically registers an hourly cron job (`lms-sentinel`) with `--deliver origin` delivery (defaulting to WhatsApp).
 
 ---
 
@@ -181,6 +181,7 @@ The installer:
 | `LMS_PASSWORD` | Student login password | *Required* |
 | `LMS_STORAGE_DIR` | Local root directory for downloaded course materials | `~/Documents/University` |
 | `LMS_STUDENT_ID` | Internal Blackboard user ID (auto-detected if omitted) | Auto-detected |
+| `HERMES_CHAT_PLATFORM` | Messaging platform for notifications via Hermes (`whatsapp`, `telegram`) | `whatsapp` |
 
 ---
 

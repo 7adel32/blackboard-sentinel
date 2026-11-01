@@ -129,7 +129,7 @@ class SentinelTrayApp:
                 all_downloads.extend(dl)
                 all_new_requests.extend(new_reqs)
                 all_external_links.extend(ext_links)
-                ann = check_lms.check_announcements(client, cid, info, state)
+                ann = check_lms.check_announcements(client, cid, info, state, new_requests=all_new_requests)
                 all_announcements.extend(ann)
 
             all_grades = check_lms.check_grades(client, state, courses_map=courses_dict)

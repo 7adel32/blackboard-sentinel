@@ -27,15 +27,24 @@ Monitors university courses in the background, automatically organizes downloade
 
 ## Performance & Speed Metrics
 
+All timings reflect real, end-to-end measurements taken on live Blackboard REST infrastructure across enrolled courses:
+
 | Operation | Typical Duration | Details |
 | :--- | :--- | :--- |
-| **First-Time Run (Cold Start)** | **~15 – 35s** | Authenticates, maps all enrolled courses via REST API, mirrors the lecturer folder hierarchy on disk, and downloads initial course files and assignments. |
-| **Routine Check (Nothing Changed)** | **~2 – 4s** | Validates grades, announcements, and deadlines against local state cache. Silent exit. |
-| **Delta Check (Changes Detected)** | **~4 – 8s** | Detects newly posted slides/materials, converts announcements to `.docx`, logs score updates, and triggers Windows toast / Telegram alerts. |
+| **Routine Check (Nothing Changed)** | **~25 – 35s** | Authenticates, queries enrolled courses, recursively walks folder trees for newly published items, checks all gradebook columns & instructor feedback, and validates deadlines against local cache. |
+| **Delta Check (Changes Detected)** | **~30 – 45s** | Traverses course trees, downloads newly posted slides/attachments into `Announcements/` or course folders, converts announcements to `.docx`, and dispatches Windows notifications and WhatsApp/Telegram alerts. |
+| **First-Time Run (Cold Start)** | **~45 – 90s** | Initial authentication, dynamic course discovery, folder structure mirroring on disk, and bulk download of all existing course materials, assignments, and announcements. |
+| **Quick CLI Helper (`lms_deadlines` / `lms_grades`)** | **~1.5 – 4.5s** | Targeted single-endpoint queries directly fetching upcoming deadlines (~1.5s) or gradebook entries (~4.3s) without recursive content tree walks. |
 
+- **Check Timing Breakdown (Routine ~31.5s Cycle)**:
+  - Authentication (REST + Cookies): ~2.0s
+  - Course mapping: ~1.4s
+  - Recursive folder & announcement traversal: ~22.3s
+  - Gradebook columns & feedback checks: ~4.3s
+  - Deadlines & calendar sync: ~1.5s
 - **Memory Footprint**:
   - **Windows System Tray App**: ~25–35 MB private working set when idling in the system tray.
-  - **Hermes Agent & Headless Linux**: **0 MB** idle RAM (executes on-demand via cron schedule, using ~18 MB for 2–4 seconds during checks and terminating immediately).
+  - **Hermes Agent & Headless Linux**: **0 MB** idle RAM (executes on-demand via cron schedule, using ~18 MB for brief checks and terminating immediately).
 
 ---
 

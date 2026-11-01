@@ -189,21 +189,32 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 AST_TZ = timezone(timedelta(hours=3))
 
 
-def send_to_chat(text):
+def send_to_chat(text, platform=None):
     if not text:
         return
     # Output to stdout so Hermes cron jobs (--deliver origin) automatically deliver to origin
     print(text)
-    # Also attempt direct send via hermes CLI if available
+
+    target_platform = platform or os.getenv("HERMES_CHAT_PLATFORM", "whatsapp").strip().lower()
+
+    # Attempt send via hermes CLI directly (WSL / Linux)
     try:
-        subprocess.run(
-            ["hermes", "send", text],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        cmd = ["hermes", "send", "--to", target_platform, text]
+        res = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0:
+            return
     except Exception:
         pass
+
+    # If on Windows, delegate to WSL hermes where gateway is active
+    if sys.platform == "win32":
+        try:
+            cmd = ["wsl.exe", "-e", "hermes", "send", "--to", target_platform, text]
+            res = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                return
+        except Exception:
+            pass
 
 
 def send_windows_toast(title, message):
@@ -759,7 +770,7 @@ def check_and_download_course_files(client, cid, info, state):
                 att_id = att.get("id")
                 fname = att.get("fileName") or title
                 dl_url = f"/learn/api/public/v1/courses/{cid}/contents/{item_id}/attachments/{att_id}/download"
-                process_file_candidate(item_id, att_id, fname, dl_url, path_hint or title, item_modified=item_modified, request_ctx=request_ctx)
+                process_file_candidate(item_id, att_id, fname, dl_url, path_hint, item_modified=item_modified, request_ctx=request_ctx)
 
         # 2. Embedded data-bbfile attachments in instructions or body
         for html_source in [handler.get("instructions", ""), item.get("body", "")]:
@@ -773,7 +784,7 @@ def check_and_download_course_files(client, cid, info, state):
                     emb_name = obj.get("fileName") or obj.get("displayName") or obj.get("linkName")
                     emb_url = obj.get("resourceUrl")
                     if emb_name and emb_url:
-                        process_file_candidate(item_id, f"emb_{emb_name}", emb_name, emb_url, path_hint or title, item_modified=item_modified, request_ctx=request_ctx)
+                        process_file_candidate(item_id, f"emb_{emb_name}", emb_name, emb_url, path_hint, item_modified=item_modified, request_ctx=request_ctx)
                 except Exception:
                     pass
 
@@ -851,10 +862,8 @@ def check_and_download_course_files(client, cid, info, state):
                         t_dir = current_req["req_dir"]
                     elif current_rel_dir:
                         t_dir = os.path.join(base_dir, current_rel_dir)
-                    elif KEEP_ALL_ANNOUNCEMENTS:
-                        t_dir = os.path.join(base_dir, "Announcements")
                     else:
-                        t_dir = os.path.join(base_dir, "Links")
+                        t_dir = os.path.join(base_dir, "Announcements")
                     os.makedirs(t_dir, exist_ok=True)
                     sc_path = os.path.join(t_dir, shortcut_fn)
                     try:
@@ -1028,27 +1037,79 @@ def check_deadlines(client, state, courses_map=None):
     return deadline_alerts
 
 
-def extract_announcement_links(body_html):
+def parse_announcement_media(body_html):
+    """Extract attached files and external URLs from announcement HTML body."""
     if not body_html:
-        return []
-    urls = []
-    for m in re.findall(r'href=[\'"]?([^\'" >]+)', body_html):
-        urls.append(m)
-    for m in re.findall(r'https?://[^\s<>"\'\)]+', body_html):
-        urls.append(m)
-    valid = []
-    seen = set()
-    for u in urls:
-        u_clean = u.strip().rstrip(".,;)>\"'")
-        if not u_clean.startswith(("http://", "https://")):
-            continue
-        if u_clean in seen:
-            continue
-        seen.add(u_clean)
-        if any(ign in u_clean.lower() for ign in ["bbcswebdav", "w3.org", "javascript:", ".jpeg", ".jpg", ".png", ".gif"]):
-            continue
-        valid.append(u_clean)
-    return valid
+        return [], []
+
+    attachments = []
+    links = []
+    seen_urls = set()
+
+    known_file_exts = (
+        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".csv", ".txt", ".py", ".ipynb"
+    )
+
+    a_pattern = re.compile(r"<a\s+([^>]+)>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+    for match in a_pattern.finditer(body_html):
+        attrs_str = match.group(1)
+        inner_text = re.sub(r"<[^>]+>", "", match.group(2)).strip()
+
+        href_m = re.search(r"href=[\x27\"]([^\x27\"]+)[\x27\"]", attrs_str, re.IGNORECASE)
+        href = html.unescape(href_m.group(1).strip()) if href_m else ""
+
+        bbfile_m = re.search(r"data-bbfile=[\x27\"]([^\x27\"]+)[\x27\"]", attrs_str, re.IGNORECASE)
+        bbtype_m = re.search(r"data-bbtype=[\x27\"]([^\x27\"]+)[\x27\"]", attrs_str, re.IGNORECASE)
+
+        is_attachment = False
+        filename = ""
+        file_url = href
+
+        if bbfile_m:
+            try:
+                raw_json = html.unescape(bbfile_m.group(1))
+                info = json.loads(raw_json)
+                filename = info.get("fileName") or info.get("displayName") or ""
+                file_url = info.get("resourceUrl") or file_url
+                is_attachment = True
+            except Exception:
+                pass
+
+        if not is_attachment and bbtype_m and bbtype_m.group(1).lower() == "attachment":
+            is_attachment = True
+
+        if not is_attachment and "bbcswebdav" in href.lower():
+            is_attachment = True
+
+        clean_url_path = urllib.parse.unquote(href.split("?")[0].rstrip("/"))
+        if not is_attachment and any(clean_url_path.lower().endswith(ext) for ext in known_file_exts):
+            is_attachment = True
+
+        if is_attachment:
+            if not filename:
+                if inner_text and any(inner_text.lower().endswith(ext) for ext in known_file_exts):
+                    filename = inner_text
+                else:
+                    filename = clean_url_path.split("/")[-1]
+            if file_url and file_url not in seen_urls:
+                seen_urls.add(file_url)
+                attachments.append({"filename": filename, "url": file_url})
+        elif href.startswith(("http://", "https://")):
+            if not any(ign in href.lower() for ign in ["w3.org", "javascript:", ".png", ".jpg", ".jpeg", ".gif", ".svg"]):
+                if href not in seen_urls:
+                    seen_urls.add(href)
+                    links.append({"title": inner_text or "External Link", "url": href})
+
+    # Also detect plain text URLs
+    for raw_u in re.findall(r"https?://[^\s<>\"'\)]+", body_html):
+        u_clean = raw_u.strip().rstrip(".,;)>\"'")
+        if u_clean.startswith(("http://", "https://")) and u_clean not in seen_urls:
+            if not any(ign in u_clean.lower() for ign in ["bbcswebdav", "w3.org", "javascript:", ".png", ".jpg", ".jpeg", ".gif", ".svg"]):
+                seen_urls.add(u_clean)
+                links.append({"title": "External Link", "url": u_clean})
+
+    return attachments, links
 
 
 def get_link_shortcut_name(url, title=""):
@@ -1070,7 +1131,7 @@ def get_link_shortcut_name(url, title=""):
     return sanitize_filename(f"{host}_{snippet}" if snippet else host)
 
 
-def save_announcement_doc(dest_path, ann_title, ann_date, ann_body, course_name, doctor, links):
+def save_announcement_doc(dest_path, ann_title, ann_date, ann_body, course_name, doctor, links=None, attached_files=None):
     try:
         import docx
         doc = docx.Document()
@@ -1091,6 +1152,11 @@ def save_announcement_doc(dest_path, ann_title, ann_date, ann_body, course_name,
             if p_clean:
                 doc.add_paragraph(p_clean)
 
+        if attached_files:
+            doc.add_heading("Attached Files", level=2)
+            for af in attached_files:
+                doc.add_paragraph(f"- {af}")
+
         if links:
             doc.add_heading("Included Links", level=2)
             for l in links:
@@ -1102,8 +1168,10 @@ def save_announcement_doc(dest_path, ann_title, ann_date, ann_body, course_name,
         try:
             with open(md_path, "w", encoding="utf-8") as f:
                 f.write(f"# {ann_title}\n\nCourse: {course_name} | Date: {ann_date}\n\n{ann_body}\n\n")
+                if attached_files:
+                    f.write("## Attached Files\n" + "\n".join(f"- {af}" for af in attached_files) + "\n\n")
                 if links:
-                    f.write("## Included Links\n" + "\n".join(f"- {l}" for l in links))
+                    f.write("## Included Links\n" + "\n".join(f"- {l}" for l in links) + "\n\n")
         except Exception:
             pass
 
@@ -1145,17 +1213,36 @@ def check_announcements(client, cid, info, state):
         clean_title = sanitize_filename(raw_title)
         body_html = ann.get("body", "")
         body_clean = clean_html(body_html)
-        links = extract_announcement_links(body_html)
+        attached_files, links = parse_announcement_media(body_html)
 
-        if KEEP_ALL_ANNOUNCEMENTS:
+        should_save_to_disk = KEEP_ALL_ANNOUNCEMENTS or bool(attached_files) or bool(links)
+        if should_save_to_disk:
             ann_dir = os.path.join(base_dir, "Announcements")
             os.makedirs(ann_dir, exist_ok=True)
             doc_path = os.path.join(ann_dir, f"{clean_title}.docx")
             if not os.path.exists(doc_path):
-                save_announcement_doc(doc_path, raw_title, formatted_date, body_clean, info["name"], info["doctor"], links)
+                save_announcement_doc(
+                    dest_path=doc_path,
+                    ann_title=raw_title,
+                    ann_date=formatted_date,
+                    ann_body=body_clean,
+                    course_name=info["name"],
+                    doctor=info["doctor"],
+                    links=[l["url"] for l in links],
+                    attached_files=[af["filename"] for af in attached_files]
+                )
 
-            for l_url in links:
-                s_name = get_link_shortcut_name(l_url)
+            # Download all attached files into Announcements/
+            for af in attached_files:
+                target_fname = sanitize_filename(af["filename"] or "attachment")
+                target_path = os.path.join(ann_dir, target_fname)
+                if not os.path.exists(target_path):
+                    client.download_file(af["url"], target_path)
+
+            # Save external URLs as .url internet shortcuts into Announcements/
+            for l_item in links:
+                l_url = l_item["url"]
+                s_name = get_link_shortcut_name(l_url, l_item.get("title", ""))
                 sc_path = os.path.join(ann_dir, f"{s_name}.url")
                 if not os.path.exists(sc_path):
                     try:
@@ -1163,23 +1250,6 @@ def check_announcements(client, cid, info, state):
                             sf.write(f"[InternetShortcut]\r\nURL={l_url}\r\n")
                     except Exception:
                         pass
-        else:
-            if links:
-                links_dir = os.path.join(base_dir, "Links")
-                os.makedirs(links_dir, exist_ok=True)
-                doc_path = os.path.join(links_dir, f"{clean_title} - Announcement Context.docx")
-                if not os.path.exists(doc_path):
-                    save_announcement_doc(doc_path, raw_title, formatted_date, body_clean, info["name"], info["doctor"], links)
-
-                for l_url in links:
-                    s_name = get_link_shortcut_name(l_url)
-                    sc_path = os.path.join(links_dir, f"{s_name}.url")
-                    if not os.path.exists(sc_path):
-                        try:
-                            with open(sc_path, "w", encoding="utf-8") as sf:
-                                sf.write(f"[InternetShortcut]\r\nURL={l_url}\r\n")
-                        except Exception:
-                            pass
 
         if not ann_id or ann_id in seen:
             continue
@@ -1190,7 +1260,9 @@ def check_announcements(client, cid, info, state):
             "doctor": info["doctor"],
             "title": raw_title,
             "date": formatted_date,
-            "body": body_clean
+            "body": body_clean,
+            "attachments": [af["filename"] for af in attached_files if af.get("filename")],
+            "links": [l["url"] for l in links if l.get("url")]
         })
 
     state["seen_announcements"] = list(seen)
@@ -1307,6 +1379,27 @@ def main():
     all_deadlines = check_deadlines(client, state, courses_map=courses_dict)
     save_state(state)
 
+    messages = format_update_messages(
+        all_downloads=all_downloads,
+        all_new_requests=all_new_requests,
+        all_announcements=all_announcements,
+        all_grades=all_grades,
+        all_deadlines=all_deadlines,
+        all_external_links=all_external_links
+    )
+
+    # Output to stdout and push notifications if updates exist (zero quota / silent otherwise)
+    manual_mode = "--manual" in sys.argv or "-m" in sys.argv
+    if messages:
+        combined_text = "\n\n---\n\n".join(messages).strip()
+        print(combined_text)
+        send_notification(combined_text)
+    elif manual_mode:
+        msg = "[Status] **LMS Sentinel Check Completed**\nAll courses are up to date. No new requests, materials, deadlines, or grade changes detected."
+        print(msg)
+
+
+def format_update_messages(all_downloads, all_new_requests, all_announcements, all_grades, all_deadlines, all_external_links):
     messages = []
 
     # 1. New requests alert
@@ -1327,7 +1420,7 @@ def main():
                 f"  *Instructor*: {r['doctor']}\n"
                 f"  *Request*: **{r['raw_title']}**\n"
                 f"  *Request Folder*: `{rel_req}`\n"
-                f"  *Files*: {files_str}\n"
+                f"  *Files*: {files_str}{inst_line}"
             )
         messages.append("\n\n".join(msg_parts))
 
@@ -1400,24 +1493,23 @@ def main():
         msg_parts = ["[Announcement] **New Blackboard Announcement**"]
         for an in all_announcements:
             date_line = f"*Posted*: {an['date']}\n" if an.get('date') else ""
+            att_line = ""
+            if an.get("attachments"):
+                att_line = f"*Attached Files*: {', '.join(an['attachments'])}\n"
+            links_line = ""
+            if an.get("links"):
+                links_line = f"*Links*: {', '.join(an['links'])}\n"
             msg_parts.append(
                 f"*Course*: {an['course']}\n"
                 f"*Instructor*: {an['doctor']}\n"
                 f"{date_line}"
-                f"*Title*: **{an['title']}**\n\n"
+                f"*Title*: **{an['title']}**\n"
+                f"{att_line}{links_line}\n"
                 f"{an['body']}"
             )
         messages.append("\n\n---\n\n".join(msg_parts))
 
-    # Output to stdout and push notifications if updates exist (zero quota / silent otherwise)
-    manual_mode = "--manual" in sys.argv or "-m" in sys.argv
-    if messages:
-        combined_text = "\n\n---\n\n".join(messages).strip()
-        print(combined_text)
-        send_notification(combined_text)
-    elif manual_mode:
-        msg = "[Status] **LMS Sentinel Check Completed**\nAll courses are up to date. No new requests, materials, deadlines, or grade changes detected."
-        print(msg)
+    return messages
 
 
 

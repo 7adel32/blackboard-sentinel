@@ -142,7 +142,19 @@ class SentinelTrayApp:
             if has_updates:
                 # Trigger 1-second notification animation
                 self.set_state(TrayIconTheme.STATE_NEW_NOTIFICATION, "New updates detected")
-                
+
+                messages = check_lms.format_update_messages(
+                    all_downloads=all_downloads,
+                    all_new_requests=all_new_requests,
+                    all_announcements=all_announcements,
+                    all_grades=all_grades,
+                    all_deadlines=all_deadlines,
+                    all_external_links=all_external_links
+                )
+                if messages:
+                    combined_text = "\n\n---\n\n".join(messages).strip()
+                    check_lms.send_notification(combined_text, "Blackboard Sentinel")
+
                 # Compose concise toast summary
                 summary_parts = []
                 if all_grades:

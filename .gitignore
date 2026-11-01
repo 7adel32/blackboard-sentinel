@@ -5,3 +5,8 @@ state/
 logs/
 *.log
 .DS_Store
+build/
+dist/
+.gemini/
+*.png
+!assets/*.png

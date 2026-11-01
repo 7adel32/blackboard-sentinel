@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Manual On-Demand LMS Grades & Feedback Viewer
-University of Tabuk - Master's in Artificial Intelligence
+University Academic LMS Portal
 """
 
 import sys
@@ -9,12 +9,22 @@ import os
 import argparse
 import subprocess
 
-sys.path.append(os.path.expanduser("~/.hermes/scripts"))
-from check_lms import LMSClient, USER_ID, PASSWORD, get_courses_map, clean_html
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+hermes_scripts = os.path.expanduser("~/.hermes/scripts")
+if os.path.exists(hermes_scripts) and hermes_scripts not in sys.path:
+    sys.path.append(hermes_scripts)
+
+from check_lms import LMSClient, get_courses_map, clean_html, init_config, is_configured
+import check_lms
 
 
 def get_all_grades():
-    client = LMSClient(USER_ID, PASSWORD)
+    init_config()
+    if not is_configured():
+        raise RuntimeError("LMS credentials not configured in .env or environment.")
+    client = LMSClient(check_lms.USER_ID, check_lms.PASSWORD)
     client.login()
 
     courses_data = []
@@ -76,10 +86,10 @@ def main():
 
     data = get_all_grades()
 
-    lines = ["📊 **University Academic Grades & Evaluation**\n"]
+    lines = ["[Grades] University Academic Grades & Evaluation\n"]
 
     for c in data:
-        lines.append(f"📚 **{c['course']}** *(👨‍🏫 {c['doctor']})*")
+        lines.append(f"**{c['course']}** *({c['doctor']})*")
         if not c["grades"]:
             lines.append("   *No posted grades yet.*\n")
             continue
@@ -96,7 +106,7 @@ def main():
             elif score is not None:
                 grade_str = f"**{score}**"
             elif status == "NeedsGrading":
-                grade_str = "⏳ *Submitted (Under Review)*"
+                grade_str = "*Submitted (Under Review)*"
             elif status:
                 grade_str = f"*{status}*"
             else:
@@ -104,7 +114,7 @@ def main():
 
             lines.append(f"   • {g['name']}: {grade_str}")
             if g["feedback"]:
-                lines.append(f"     💬 *Feedback*: {g['feedback']}")
+                lines.append(f"     *Feedback*: {g['feedback']}")
         lines.append("")
 
     out = "\n".join(lines).strip()

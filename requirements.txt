@@ -1,1 +1,5 @@
-# Blackboard Sentinel requires Python 3.10+ standard library.
+# Core Blackboard Sentinel operates on Python 3.10+ standard library.
+# The dependencies below are required for Windows System Tray mode:
+pillow>=10.0.0
+pystray>=0.19.0
+python-docx>=1.1.0

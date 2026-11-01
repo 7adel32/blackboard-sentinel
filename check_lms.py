@@ -3,13 +3,10 @@
 Blackboard LMS Automated Course Sync, Announcements & Deadline Sentinel
 University LMS Portal Sentinel
 
-Monitored Courses:
-  - 601 CSC: أساسيات الذكاء الاصطناعي (د. عماد الحربي) -> AI FUNDAMENTALS
-  - 602 CSC: الرياضيات الحاسوبية (د. محمد زيشان عالم) -> Mathematics for Machine Learning
-  - 605 CSC: البرمجة المتقدمة وإطارات برمجة (د. أحمد مباركي) -> advanced programming
-  - 608 CSC: طرق بحث (د. محمد الوكيل) -> research methods
+Automatically monitors enrolled courses, syncs course materials and assignment briefs,
+tracks grades and deadlines, and dispatches instant alerts.
 
-Zero-quota Hermes watchdog: outputs to stdout and dispatches to Telegram only when updates occur.
+Zero-quota Hermes watchdog: outputs to stdout and dispatches notifications only when updates occur.
 """
 
 import os
@@ -23,35 +20,152 @@ import urllib.parse
 import http.cookiejar
 from datetime import datetime, timezone, timedelta
 
-# Configuration
-LMS_URL = os.getenv("LMS_URL", "").rstrip("/")
-USER_ID = os.getenv("LMS_USER_ID", "")
-PASSWORD = os.getenv("LMS_PASSWORD", "")
-STUDENT_USER_ID = os.getenv("LMS_STUDENT_ID", "")
+# Ensure UTF-8 output on Windows consoles to prevent cp1252 UnicodeEncodeError on Arabic strings
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
-if not LMS_URL or not USER_ID or not PASSWORD:
-    print("Error: LMS_URL, LMS_USER_ID, and LMS_PASSWORD must be set in ~/.hermes/.env or environment.", file=sys.stderr)
-    sys.exit(1)
+def load_env_file(filepath):
+    """Load key-value pairs from a .env file into os.environ if not already set."""
+    if not os.path.isfile(filepath):
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except Exception:
+        pass
 
-STATE_DIR = os.path.expanduser("~/.hermes/state")
-STATE_FILE = os.path.join(STATE_DIR, "lms_tracker_state.json")
-LOGS_DIR = os.path.expanduser("~/.hermes/logs")
 
-# Course mappings with lecturer names and target directories
-LMS_STORAGE_DIR = os.path.expanduser(os.getenv("LMS_STORAGE_DIR", "~/Documents/University"))
+def init_config():
+    """Discover environment configuration from local .env, Hermes, or system paths."""
+    candidates = [
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        os.path.expanduser("~/.hermes/.env"),
+    ]
+    if sys.platform == "win32":
+        appdata = os.getenv("APPDATA", os.path.expanduser("~"))
+        candidates.append(os.path.join(appdata, "BlackboardSentinel", ".env"))
 
-def get_courses_map(client):
-    """Dynamically discover enrolled courses from Blackboard and map subfolders named after each course."""
-    courses_map = {}
+    for c in candidates:
+        if os.path.isfile(c):
+            load_env_file(c)
+
+    global LMS_URL, USER_ID, PASSWORD, STUDENT_USER_ID, LMS_STORAGE_DIR, LMS_COURSES, TRAY_THEME, STATE_DIR, STATE_FILE, LOGS_DIR, KEEP_ALL_ANNOUNCEMENTS
+
+    LMS_URL = os.getenv("LMS_URL", "").rstrip("/")
+    USER_ID = os.getenv("LMS_USER_ID", "")
+    PASSWORD = os.getenv("LMS_PASSWORD", "")
+    STUDENT_USER_ID = os.getenv("LMS_STUDENT_ID", "")
+    LMS_STORAGE_DIR = os.path.expanduser(os.getenv("LMS_STORAGE_DIR", "~/Documents/University"))
+    LMS_COURSES = os.getenv("LMS_COURSES", "")
+    TRAY_THEME = os.getenv("TRAY_THEME", "auto")
+    KEEP_ALL_ANNOUNCEMENTS = os.getenv("LMS_KEEP_ALL_ANNOUNCEMENTS", "false").lower() in ("true", "1", "yes")
+
+    hermes_state = os.path.expanduser("~/.hermes/state")
+    if os.path.exists(hermes_state) or os.path.exists(os.path.expanduser("~/.hermes")):
+        STATE_DIR = hermes_state
+        LOGS_DIR = os.path.expanduser("~/.hermes/logs")
+    elif sys.platform == "win32":
+        local_appdata = os.getenv("LOCALAPPDATA", os.path.expanduser("~"))
+        STATE_DIR = os.path.join(local_appdata, "BlackboardSentinel", "state")
+        LOGS_DIR = os.path.join(local_appdata, "BlackboardSentinel", "logs")
+    else:
+        STATE_DIR = os.path.expanduser("~/.blackboard-sentinel/state")
+        LOGS_DIR = os.path.expanduser("~/.blackboard-sentinel/logs")
+
+    STATE_FILE = os.path.join(STATE_DIR, "lms_tracker_state.json")
+
+
+def is_configured():
+    return bool(LMS_URL and USER_ID and PASSWORD)
+
+
+# Initial configuration bootstrap on module load
+init_config()
+
+def fetch_all_available_courses(client):
+    """Fetch all courses the user was ever enrolled in, sorted recent-to-ancient."""
+    discovered = []
     try:
         user_courses = client.get_json("/learn/api/public/v1/users/me/courses")
+        if not user_courses or "results" not in user_courses:
+            return []
         for enrollment in user_courses.get("results", []):
             cid = enrollment.get("courseId")
             if not cid:
                 continue
             cinfo = client.get_json(f"/learn/api/public/v3/courses/{cid}") or {}
             raw_name = cinfo.get("name") or cinfo.get("courseId") or cid
-            # Clean course name for folder path (remove invalid filesystem characters)
+            clean_name = re.sub(r'[/\\?%*:|"<>]', ' ', raw_name)
+            clean_name = re.sub(r'\s+', ' ', clean_name).strip()
+
+            code_m = re.search(r'([0-9]{3}\s+[A-Za-z]+|[A-Za-z]+\s+[0-9]{3})', clean_name)
+            code = code_m.group(0) if code_m else ""
+
+            created_raw = cinfo.get("created") or enrollment.get("created") or cinfo.get("modified") or ""
+            date_display = ""
+            if created_raw:
+                try:
+                    dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                    date_display = dt.strftime("%b %Y")
+                except Exception:
+                    date_display = created_raw[:10]
+
+            display = f"{code}: {clean_name}" if code and code not in clean_name else clean_name
+            if date_display:
+                display = f"{display}  [{date_display}]"
+
+            discovered.append({
+                "id": cid,
+                "code": code,
+                "name": clean_name,
+                "created": created_raw,
+                "date_display": date_display,
+                "display_name": display
+            })
+    except Exception as e:
+        sys.stderr.write(f"Error fetching course list: {e}\n")
+
+    # Sort recent to ancient
+    discovered.sort(key=lambda c: c.get("created") or "", reverse=True)
+    return discovered
+
+
+def get_courses_map(client):
+    """Dynamically discover enrolled courses from Blackboard, filtered by LMS_COURSES if configured."""
+    courses_map = {}
+    allowed_ids = set()
+    courses_cfg = os.getenv("LMS_COURSES", "").strip()
+    if courses_cfg:
+        allowed_ids = set(x.strip() for x in courses_cfg.split(",") if x.strip())
+
+    try:
+        user_courses = client.get_json("/learn/api/public/v1/users/me/courses")
+        for enrollment in user_courses.get("results", []):
+            cid = enrollment.get("courseId")
+            if not cid:
+                continue
+            if allowed_ids and cid not in allowed_ids:
+                continue
+
+            cinfo = client.get_json(f"/learn/api/public/v3/courses/{cid}") or {}
+            raw_name = cinfo.get("name") or cinfo.get("courseId") or cid
             clean_name = re.sub(r'[/\\?%*:|"<>]', ' ', raw_name)
             clean_name = re.sub(r'\s+', ' ', clean_name).strip()
             
@@ -75,9 +189,12 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 AST_TZ = timezone(timedelta(hours=3))
 
 
-def send_telegram(text):
+def send_to_chat(text):
     if not text:
         return
+    # Output to stdout so Hermes cron jobs (--deliver origin) automatically deliver to origin
+    print(text)
+    # Also attempt direct send via hermes CLI if available
     try:
         subprocess.run(
             ["hermes", "send", text],
@@ -87,6 +204,39 @@ def send_telegram(text):
         )
     except Exception:
         pass
+
+
+def send_windows_toast(title, message):
+    if sys.platform != "win32":
+        return
+    safe_title = title.replace("'", "''").replace("\n", " ")
+    lines = [l.strip() for l in message.strip().split("\n") if l.strip()]
+    safe_msg = (" - ".join(lines[:2]) if lines else "Updates detected").replace("'", "''")
+    if len(safe_msg) > 160:
+        safe_msg = safe_msg[:157] + "..."
+    ps_script = f"""
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+    $textNodes = $template.GetElementsByTagName('text')
+    $textNodes.Item(0).AppendChild($template.CreateTextNode('{safe_title}')) | Out-Null
+    $textNodes.Item(1).AppendChild($template.CreateTextNode('{safe_msg}')) | Out-Null
+    $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Blackboard Sentinel').Show($toast)
+    """
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        pass
+
+
+def send_notification(text, title="Blackboard Sentinel"):
+    if not text:
+        return
+    # 1. Hermes / Chat push (always to origin)
+    send_to_chat(text)
+    # 2. Windows Native Toast alert
+    if sys.platform == "win32":
+        send_windows_toast(title, text)
 
 
 def load_state():
@@ -115,6 +265,138 @@ def save_state(state):
     os.replace(tmp_path, STATE_FILE)
 
 
+DEFAULT_TIMEOUT = 6
+
+URL_REGEX = re.compile(
+    r"^(?:https?://)?"
+    r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
+    r"[a-zA-Z]{2,}"
+    r"(?::\d{1,5})?"
+    r"(?:/.*)?$",
+    re.IGNORECASE
+)
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Prevent automated multi-hop redirect chains that can cause 30+ second hangs."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def validate_blackboard_url(url, timeout=3.0):
+    """
+    Two-layer pre-flight validation of the Blackboard LMS URL:
+      Layer 1: Instant client-side regex check (<1ms)
+      Layer 2: Fast Blackboard Learn Ultra signature probe (max 3.0s hard ceiling)
+    Accepts both 'lms.university.edu' and 'https://lms.university.edu'.
+    """
+    raw = (url or "").strip().rstrip("/")
+    if not raw:
+        raise ValueError("LMS URL cannot be empty.")
+
+    if not URL_REGEX.match(raw):
+        raise ValueError(
+            f"'{raw}' is not a valid web address.\n\n"
+            "Please enter your university LMS domain (e.g. lms.university.edu or https://lms.university.edu)."
+        )
+
+    clean = raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
+
+    parsed = urllib.parse.urlparse(clean)
+    host = parsed.hostname
+    port = parsed.port or (443 if clean.startswith("https") else 80)
+    if not host:
+        raise ValueError(f"Invalid domain in URL: '{clean}'")
+
+    result = {"error": None, "done": False}
+
+    def _probe_worker():
+        import socket
+        try:
+            # 1. Fast socket connectivity & DNS resolution check (max timeout)
+            try:
+                s = socket.create_connection((host, port), timeout=timeout)
+                s.close()
+            except socket.gaierror:
+                result["error"] = ValueError(f"Domain does not exist or DNS lookup failed for '{host}'. Please verify spelling.")
+                return
+            except (socket.timeout, TimeoutError):
+                result["error"] = ValueError(f"Connection to '{host}' timed out after {int(timeout)} seconds. Server is unreachable.")
+                return
+            except ConnectionRefusedError:
+                result["error"] = ValueError(f"Connection refused by '{host}'. No web service is running on port {port}.")
+                return
+            except Exception as e:
+                result["error"] = ValueError(f"Could not reach '{host}': {e}")
+                return
+
+            # 2. Probe Blackboard Learn Ultra portal signature
+            probe_url = f"{clean}/webapps/login/"
+            cj = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(NoRedirectHandler(), urllib.request.HTTPCookieProcessor(cj))
+            req = urllib.request.Request(probe_url, headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            })
+
+            headers_str = ""
+            content = ""
+            try:
+                with opener.open(req, timeout=timeout) as resp:
+                    headers_str = str(resp.headers).lower()
+                    content = resp.read(32768).decode("utf-8", errors="ignore").lower()
+            except urllib.error.HTTPError as e:
+                headers_str = str(e.headers).lower() if e.headers else ""
+                try:
+                    content = e.read(32768).decode("utf-8", errors="ignore").lower()
+                except Exception:
+                    content = ""
+                # If 404 on /webapps/login/ without BB signature, definitely not Blackboard
+                if e.code == 404 and "blackboard" not in headers_str and "bb" not in headers_str:
+                    result["error"] = ValueError(
+                        f"Connected to '{host}', but '/webapps/login/' was not found (HTTP 404).\n\n"
+                        "This server is running, but it does not host a Blackboard Learn LMS."
+                    )
+                    return
+            except urllib.error.URLError as e:
+                reason = str(e.reason).lower()
+                if "timed out" in reason:
+                    result["error"] = ValueError(f"Connection to '{host}' timed out after {int(timeout)} seconds. Server is unreachable.")
+                elif "connection refused" in reason:
+                    result["error"] = ValueError(f"Connection refused by '{host}'.")
+                elif "certificate" in reason or "ssl" in reason:
+                    result["error"] = ValueError(f"SSL certificate error connecting to '{host}': {e.reason}")
+                else:
+                    result["error"] = ValueError(f"Could not connect to '{host}': {e.reason}")
+                return
+
+            bb_indicators = ["blackboard", "nonceutil", "bb-root", "loginform", "learn/api", "bb_product", "jsessionid"]
+            has_sig = any(k in content for k in bb_indicators) or any(k in headers_str for k in ["blackboard", "jsessionid", "bb-"])
+
+            if not has_sig:
+                result["error"] = ValueError(
+                    f"Connected to '{host}', but this does NOT appear to be a Blackboard Learn Ultra portal.\n\n"
+                    "No Blackboard gateway signatures were detected. Please ensure you entered your university LMS login portal URL (e.g. lms.university.edu)."
+                )
+                return
+
+            result["done"] = True
+        except Exception as ex:
+            result["error"] = ex
+
+    import threading
+    t = threading.Thread(target=_probe_worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout + 0.5)
+
+    if not result["done"]:
+        if result["error"]:
+            raise result["error"]
+        raise ValueError(f"Connection to '{host}' timed out after {int(timeout)} seconds. Server is unreachable.")
+
+    return clean
+
+
 class LMSClient:
     def __init__(self, username, password):
         self.username = username
@@ -122,9 +404,11 @@ class LMSClient:
         self.cj = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj))
 
-    def login(self):
+    def login(self, timeout=DEFAULT_TIMEOUT):
+        validate_blackboard_url(LMS_URL, timeout=5)
+
         req = urllib.request.Request(f"{LMS_URL}/webapps/login/", headers={"User-Agent": USER_AGENT})
-        with self.opener.open(req) as resp:
+        with self.opener.open(req, timeout=timeout) as resp:
             html = resp.read().decode("utf-8", errors="ignore")
 
         nonce_m = re.search(r'name="blackboard\.platform\.security\.NonceUtil\.nonce\.ajax"\s+value="([^"]+)"', html)
@@ -152,10 +436,10 @@ class LMSClient:
             }
         )
 
-        with self.opener.open(post_req) as resp:
+        with self.opener.open(post_req, timeout=timeout) as resp:
             final_url = resp.geturl()
-            if "login" in final_url.lower():
-                raise RuntimeError(f"LMS login failed: redirected to {final_url}")
+            if "login" in final_url.lower() or "relogin" in final_url.lower() or "loginerror" in final_url.lower():
+                raise ValueError("Invalid username or password. Please check your student ID and password.")
         self.student_user_id = ""
         try:
             me_data = self.get_json("/learn/api/public/v1/users/me")
@@ -165,14 +449,14 @@ class LMSClient:
             pass
         return True
 
-    def get_json(self, path_or_url):
+    def get_json(self, path_or_url, timeout=DEFAULT_TIMEOUT):
         url = path_or_url if path_or_url.startswith("http") else f"{LMS_URL}{path_or_url}"
         req = urllib.request.Request(url, headers={
             "User-Agent": USER_AGENT,
             "Accept": "application/json, text/plain, */*"
         })
         try:
-            with self.opener.open(req) as resp:
+            with self.opener.open(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8", errors="ignore"))
         except Exception:
             return None
@@ -301,24 +585,10 @@ def is_request_item(item, parent_title=""):
 
     # 1. Blackboard Assessment / Assignment / Submission item
     if any(x in handler_id for x in ["asmt", "assignment", "turnitin"]):
-        self.student_user_id = ""
-        try:
-            me_data = self.get_json("/learn/api/public/v1/users/me")
-            if me_data and "id" in me_data:
-                self.student_user_id = me_data["id"]
-        except Exception:
-            pass
         return True
 
     # 2. Content item / file / folder with request keywords in title
     if any(re.search(pat, title_norm) for pat in REQUEST_KEYWORDS):
-        self.student_user_id = ""
-        try:
-            me_data = self.get_json("/learn/api/public/v1/users/me")
-            if me_data and "id" in me_data:
-                self.student_user_id = me_data["id"]
-        except Exception:
-            pass
         return True
 
     return False
@@ -332,17 +602,19 @@ def get_request_folder_name(raw_title):
     return name or "Request"
 
 
-def to_windows_path(wsl_path):
+def to_windows_path(path):
+    if sys.platform == "win32":
+        return os.path.normpath(path)
     try:
         res = subprocess.run(
-            ["wslpath", "-w", wsl_path],
+            ["wslpath", "-w", path],
             capture_output=True,
             text=True,
             check=True,
         )
         return res.stdout.strip()
     except Exception:
-        return wsl_path
+        return path
 
 
 def get_existing_filenames_on_disk(base_dir):
@@ -404,7 +676,16 @@ def check_and_download_course_files(client, cid, info, state):
                 if item_modified:
                     seen_files_mtime[file_key] = item_modified
                 return
-            target_dir = find_target_subfolder(base_dir, context)
+            target_dir = os.path.join(base_dir, context) if context else base_dir
+            if context:
+                flat_root_path = os.path.join(base_dir, fname_clean)
+                if not os.path.exists(os.path.join(target_dir, fname_clean)) and os.path.exists(flat_root_path):
+                    try:
+                        import shutil
+                        os.makedirs(target_dir, exist_ok=True)
+                        shutil.move(flat_root_path, os.path.join(target_dir, fname_clean))
+                    except Exception:
+                        pass
 
         target_path = os.path.join(target_dir, fname_clean)
 
@@ -429,8 +710,10 @@ def check_and_download_course_files(client, cid, info, state):
                 if request_ctx is not None and fname_clean not in request_ctx["files"]:
                     request_ctx["files"].append(fname_clean)
                 return
-        elif file_key in seen_files_set or (request_ctx is None and fname_lower in existing_files_lower):
-            seen_files_set.add(file_key)
+        elif file_key in seen_files_set and os.path.exists(target_path):
+            if item_modified:
+                seen_files_mtime[file_key] = item_modified
+            return
             if item_modified:
                 seen_files_mtime[file_key] = item_modified
             return
@@ -448,7 +731,10 @@ def check_and_download_course_files(client, cid, info, state):
             existing_files_lower.add(fname_lower)
             if request_ctx is not None and fname_clean not in request_ctx["files"]:
                 request_ctx["files"].append(fname_clean)
-            rel_saved = os.path.relpath(target_path, "/mnt/c/Users/Percent/Documents")
+            try:
+                rel_saved = os.path.relpath(target_path, LMS_STORAGE_DIR)
+            except ValueError:
+                rel_saved = target_path
             downloads.append({
                 "course": f"{info['name']} ({info['code']})",
                 "doctor": info["doctor"],
@@ -502,7 +788,7 @@ def check_and_download_course_files(client, cid, info, state):
             if txt and txt not in request_ctx["instructions_parts"]:
                 request_ctx["instructions_parts"].append(txt)
 
-    def traverse_contents(parent_id=None, path_hint="", active_request=None):
+    def traverse_contents(parent_id=None, current_rel_dir="", active_request=None):
         url = f"/learn/api/public/v1/courses/{cid}/contents" if parent_id is None else f"/learn/api/public/v1/courses/{cid}/contents/{parent_id}/children"
         data = client.get_json(url)
         if not data or "results" not in data:
@@ -513,11 +799,12 @@ def check_and_download_course_files(client, cid, info, state):
             item_id = item.get("id")
             handler = item.get("contentHandler", {}) or {}
             handler_id = handler.get("id", "")
+            clean_item_title = sanitize_filename(title)
 
             current_req = active_request
             started_new_req_scope = False
 
-            if current_req is None and is_request_item(item, path_hint):
+            if current_req is None and is_request_item(item, current_rel_dir):
                 req_key = f"{cid}_{item_id}"
                 req_folder_name = get_request_folder_name(title)
                 req_dir = os.path.join(base_dir, req_folder_name)
@@ -562,13 +849,23 @@ def check_and_download_course_files(client, cid, info, state):
                     seen_links_set.add(link_key)
                     clean_lt = sanitize_filename(l_title or "External Resource")
                     shortcut_fn = f"{clean_lt}.url"
-                    t_dir = find_target_subfolder(base_dir, path_hint or title) if current_req is None else current_req["req_dir"]
+                    if current_req is not None:
+                        t_dir = current_req["req_dir"]
+                    elif current_rel_dir:
+                        t_dir = os.path.join(base_dir, current_rel_dir)
+                    elif KEEP_ALL_ANNOUNCEMENTS:
+                        t_dir = os.path.join(base_dir, "Announcements")
+                    else:
+                        t_dir = os.path.join(base_dir, "Links")
                     os.makedirs(t_dir, exist_ok=True)
                     sc_path = os.path.join(t_dir, shortcut_fn)
                     try:
                         with open(sc_path, "w", encoding="utf-8") as sf:
-                            sf.write(f"[InternetShortcut]\nURL={l_url}\n")
-                        rel_sc = os.path.relpath(sc_path, "/mnt/c/Users/Percent/Documents")
+                            sf.write(f"[InternetShortcut]\r\nURL={l_url}\r\n")
+                        try:
+                            rel_sc = os.path.relpath(sc_path, LMS_STORAGE_DIR)
+                        except ValueError:
+                            rel_sc = sc_path
                         external_links.append({
                             "course": f"{info['name']} ({info['code']})",
                             "doctor": info["doctor"],
@@ -579,10 +876,12 @@ def check_and_download_course_files(client, cid, info, state):
                     except Exception:
                         pass
 
-            if "folder" in handler_id:
-                traverse_contents(item_id, title, active_request=current_req)
+            is_container = "folder" in handler_id.lower() or item.get("hasChildren")
+            if is_container:
+                child_rel_dir = os.path.join(current_rel_dir, clean_item_title) if current_rel_dir else clean_item_title
+                traverse_contents(item_id, current_rel_dir=child_rel_dir, active_request=current_req)
             else:
-                extract_and_download_item_files(item, path_hint or title, request_ctx=current_req)
+                extract_and_download_item_files(item, current_rel_dir, request_ctx=current_req)
 
             if started_new_req_scope and current_req is not None:
                 seen_requests_set.add(current_req["req_key"])
@@ -618,7 +917,7 @@ def check_and_download_course_files(client, cid, info, state):
     return downloads, new_requests, external_links
 
 
-def check_deadlines(client, state):
+def check_deadlines(client, state, courses_map=None):
     deadline_alerts = []
     now = datetime.now(timezone.utc)
     since_str = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -732,19 +1031,110 @@ def check_deadlines(client, state):
     return deadline_alerts
 
 
+def extract_announcement_links(body_html):
+    if not body_html:
+        return []
+    urls = []
+    for m in re.findall(r'href=[\'"]?([^\'" >]+)', body_html):
+        urls.append(m)
+    for m in re.findall(r'https?://[^\s<>"\'\)]+', body_html):
+        urls.append(m)
+    valid = []
+    seen = set()
+    for u in urls:
+        u_clean = u.strip().rstrip(".,;)>\"'")
+        if not u_clean.startswith(("http://", "https://")):
+            continue
+        if u_clean in seen:
+            continue
+        seen.add(u_clean)
+        if any(ign in u_clean.lower() for ign in ["bbcswebdav", "w3.org", "javascript:", ".jpeg", ".jpg", ".png", ".gif"]):
+            continue
+        valid.append(u_clean)
+    return valid
+
+
+def get_link_shortcut_name(url, title=""):
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc or "link"
+    path = parsed.path.strip("/")
+    if "forms.office.com" in host or "forms.microsoft.com" in host:
+        code = path.split("/")[-1] if path else "Form"
+        return f"Microsoft Forms ({code})"
+    if "login.microsoftonline.com" in host:
+        return "Microsoft Online Login"
+    if "drive.google.com" in host:
+        return "Google Drive"
+    if "docs.google.com" in host:
+        return "Google Docs"
+    if title and len(title) <= 40:
+        return sanitize_filename(title)
+    snippet = path.replace("/", "_")[:30]
+    return sanitize_filename(f"{host}_{snippet}" if snippet else host)
+
+
+def save_announcement_doc(dest_path, ann_title, ann_date, ann_body, course_name, doctor, links):
+    try:
+        import docx
+        doc = docx.Document()
+        doc.add_heading(ann_title or "Announcement", level=1)
+        meta = []
+        if course_name:
+            meta.append(f"Course: {course_name}")
+        if doctor:
+            meta.append(f"Instructor: {doctor}")
+        if ann_date:
+            meta.append(f"Date: {ann_date}")
+        if meta:
+            doc.add_paragraph(" | ".join(meta))
+
+        doc.add_heading("Announcement Text", level=2)
+        for p in (ann_body or "").split("\n\n"):
+            p_clean = p.strip()
+            if p_clean:
+                doc.add_paragraph(p_clean)
+
+        if links:
+            doc.add_heading("Included Links", level=2)
+            for l in links:
+                doc.add_paragraph(f"- {l}")
+        doc.save(dest_path)
+    except Exception:
+        # Fallback to markdown if python-docx fails
+        md_path = os.path.splitext(dest_path)[0] + ".md"
+        try:
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(f"# {ann_title}\n\nCourse: {course_name} | Date: {ann_date}\n\n{ann_body}\n\n")
+                if links:
+                    f.write("## Included Links\n" + "\n".join(f"- {l}" for l in links))
+        except Exception:
+            pass
+
+
 def check_announcements(client, cid, info, state):
     new_announcements = []
     seen = set(state.get("seen_announcements", []))
-    data = client.get_json(f"/learn/api/public/v1/courses/{cid}/announcements")
-    if not data or "results" not in data:
-        return new_announcements
 
-    for ann in data["results"]:
+    # Fetch from both course announcements and course portal announcements
+    ann_candidates = []
+    seen_ann_ids = set()
+
+    for ep in [
+        f"/learn/api/public/v1/courses/{cid}/announcements",
+        f"/learn/api/public/v1/announcements?courseId={cid}"
+    ]:
+        data = client.get_json(ep)
+        if data and "results" in data:
+            for ann in data["results"]:
+                aid = ann.get("id")
+                if aid and aid not in seen_ann_ids:
+                    seen_ann_ids.add(aid)
+                    ann_candidates.append(ann)
+
+    base_dir = info.get("dir") or os.path.join(LMS_STORAGE_DIR, sanitize_filename(info["name"]))
+
+    for ann in ann_candidates:
         ann_id = ann.get("id")
-        if not ann_id or ann_id in seen:
-            continue
-
-        seen.add(ann_id)
         created_raw = ann.get("created", "")
         formatted_date = ""
         if created_raw:
@@ -754,11 +1144,54 @@ def check_announcements(client, cid, info, state):
             except Exception:
                 formatted_date = created_raw
 
-        body_clean = clean_html(ann.get("body", ""))
+        raw_title = ann.get("title") or "Announcement"
+        clean_title = sanitize_filename(raw_title)
+        body_html = ann.get("body", "")
+        body_clean = clean_html(body_html)
+        links = extract_announcement_links(body_html)
+
+        if KEEP_ALL_ANNOUNCEMENTS:
+            ann_dir = os.path.join(base_dir, "Announcements")
+            os.makedirs(ann_dir, exist_ok=True)
+            doc_path = os.path.join(ann_dir, f"{clean_title}.docx")
+            if not os.path.exists(doc_path):
+                save_announcement_doc(doc_path, raw_title, formatted_date, body_clean, info["name"], info["doctor"], links)
+
+            for l_url in links:
+                s_name = get_link_shortcut_name(l_url)
+                sc_path = os.path.join(ann_dir, f"{s_name}.url")
+                if not os.path.exists(sc_path):
+                    try:
+                        with open(sc_path, "w", encoding="utf-8") as sf:
+                            sf.write(f"[InternetShortcut]\r\nURL={l_url}\r\n")
+                    except Exception:
+                        pass
+        else:
+            if links:
+                links_dir = os.path.join(base_dir, "Links")
+                os.makedirs(links_dir, exist_ok=True)
+                doc_path = os.path.join(links_dir, f"{clean_title} - Announcement Context.docx")
+                if not os.path.exists(doc_path):
+                    save_announcement_doc(doc_path, raw_title, formatted_date, body_clean, info["name"], info["doctor"], links)
+
+                for l_url in links:
+                    s_name = get_link_shortcut_name(l_url)
+                    sc_path = os.path.join(links_dir, f"{s_name}.url")
+                    if not os.path.exists(sc_path):
+                        try:
+                            with open(sc_path, "w", encoding="utf-8") as sf:
+                                sf.write(f"[InternetShortcut]\r\nURL={l_url}\r\n")
+                        except Exception:
+                            pass
+
+        if not ann_id or ann_id in seen:
+            continue
+
+        seen.add(ann_id)
         new_announcements.append({
             "course": f"{info['name']} ({info['code']})",
             "doctor": info["doctor"],
-            "title": ann.get("title"),
+            "title": raw_title,
             "date": formatted_date,
             "body": body_clean
         })
@@ -844,7 +1277,10 @@ def check_grades(client, state, courses_map=None, student_user_id=None):
 
 
 def main():
-
+    init_config()
+    if not is_configured():
+        print("Error: LMS_URL, LMS_USER_ID, and LMS_PASSWORD must be configured in .env or environment.", file=sys.stderr)
+        sys.exit(1)
 
     state = load_state()
     client = LMSClient(USER_ID, PASSWORD)
@@ -861,7 +1297,7 @@ def main():
 
     all_external_links = []
 
-    courses_dict = courses_map if courses_map is not None else get_courses_map(client)
+    courses_dict = get_courses_map(client)
     for cid, info in courses_dict.items():
         dl, new_reqs, ext_links = check_and_download_course_files(client, cid, info, state)
         all_downloads.extend(dl)
@@ -870,29 +1306,31 @@ def main():
         ann = check_announcements(client, cid, info, state)
         all_announcements.extend(ann)
 
-    all_grades = check_grades(client, state)
-    all_deadlines = check_deadlines(client, state)
+    all_grades = check_grades(client, state, courses_map=courses_dict)
+    all_deadlines = check_deadlines(client, state, courses_map=courses_dict)
     save_state(state)
 
     messages = []
 
     # 1. New requests alert
     if all_new_requests:
-        model_id = get_latest_flash_medium_model()
-        msg_parts = ["🆕 **New Course Request Detected**"]
+        msg_parts = ["[New Request] **New Course Request Detected**"]
         for r in all_new_requests:
-            rel_req = os.path.relpath(r["req_dir"], "/mnt/c/Users/Percent/Documents")
+            try:
+                rel_req = os.path.relpath(r["req_dir"], LMS_STORAGE_DIR)
+            except ValueError:
+                rel_req = r["req_dir"]
             files_str = ", ".join(f"`{f}`" for f in r["files"]) if r["files"] else "*(Text instructions only)*"
             inst_preview = r.get("instructions_text", "")
             if len(inst_preview) > 350:
                 inst_preview = inst_preview[:350] + "..."
-            inst_line = f"\n  📋 *Instructions*: {inst_preview}" if inst_preview else ""
+            inst_line = f"\n  *Instructions*: {inst_preview}" if inst_preview else ""
             msg_parts.append(
-                f"• 📚 *Course*: {r['course_name']} ({r['course_code']})\n"
-                f"  👨‍🏫 *Instructor*: {r['doctor']}\n"
-                f"  📝 *Request*: **{r['raw_title']}**\n"
-                f"  📁 *Request Folder*: `{rel_req}`\n"
-                f"  📄 *Files*: {files_str}\n"
+                f"• *Course*: {r['course_name']} ({r['course_code']})\n"
+                f"  *Instructor*: {r['doctor']}\n"
+                f"  *Request*: **{r['raw_title']}**\n"
+                f"  *Request Folder*: `{rel_req}`\n"
+                f"  *Files*: {files_str}\n"
             )
         messages.append("\n\n".join(msg_parts))
 
@@ -901,87 +1339,87 @@ def main():
     updated_downloads = [d for d in all_downloads if d.get("is_update")]
 
     if brand_new_downloads:
-        msg_parts = ["📥 **New Course Material Downloaded**"]
+        msg_parts = ["[Download] **New Course Material Downloaded**"]
         for d in brand_new_downloads:
             msg_parts.append(
-                f"• 📚 *Course*: {d['course']}\n"
-                f"  👨‍🏫 *Instructor*: {d['doctor']}\n"
-                f"  📄 *File*: `{d['file']}`\n"
-                f"  📁 *Saved to*: `{d['saved']}`"
+                f"• *Course*: {d['course']}\n"
+                f"  *Instructor*: {d['doctor']}\n"
+                f"  *File*: `{d['file']}`\n"
+                f"  *Saved to*: `{d['saved']}`"
             )
         messages.append("\n\n".join(msg_parts))
 
     if updated_downloads:
-        msg_parts = ["🔄 **Course Material Updated (Revised Version)**"]
+        msg_parts = ["[Update] **Course Material Updated (Revised Version)**"]
         for d in updated_downloads:
             msg_parts.append(
-                f"• 📚 *Course*: {d['course']}\n"
-                f"  👨‍🏫 *Instructor*: {d['doctor']}\n"
-                f"  📄 *File*: `{d['file']}`\n"
-                f"  📁 *Saved to*: `{d['saved']}`"
+                f"• *Course*: {d['course']}\n"
+                f"  *Instructor*: {d['doctor']}\n"
+                f"  *File*: `{d['file']}`\n"
+                f"  *Saved to*: `{d['saved']}`"
             )
         messages.append("\n\n".join(msg_parts))
 
     # 2b. External links & cloud resources
     if all_external_links:
-        msg_parts = ["🔗 **New Course Link / Cloud Resource**"]
+        msg_parts = ["[Resource] **New Course Link / Cloud Resource**"]
         for l in all_external_links:
             msg_parts.append(
-                f"• 📚 *Course*: {l['course']}\n"
-                f"  👨‍🏫 *Instructor*: {l['doctor']}\n"
-                f"  📌 *Title*: **{l['title']}**\n"
-                f"  🌐 *URL*: {l['url']}\n"
-                f"  📁 *Saved Shortcut*: `{l['saved']}`"
+                f"• *Course*: {l['course']}\n"
+                f"  *Instructor*: {l['doctor']}\n"
+                f"  *Title*: **{l['title']}**\n"
+                f"  *URL*: {l['url']}\n"
+                f"  *Saved Shortcut*: `{l['saved']}`"
             )
         messages.append("\n\n".join(msg_parts))
 
     # 3. Approaching deadlines alert
     if all_deadlines:
-        msg_parts = ["⏰ **Upcoming Assignment / Project Deadline**"]
+        msg_parts = ["[Deadline] **Upcoming Assignment / Project Deadline**"]
         for dl in all_deadlines:
             doc_str = f" ({dl['doctor']})" if dl.get('doctor') else ""
             msg_parts.append(
-                f"• 📚 *Course*: {dl['course']}{doc_str}\n"
-                f"  📝 *Task*: **{dl['task']}**\n"
-                f"  ⏳ *Due*: {dl['due']} ({dl['remaining']})"
+                f"• *Course*: {dl['course']}{doc_str}\n"
+                f"  *Task*: **{dl['task']}**\n"
+                f"  *Due*: {dl['due']} ({dl['remaining']})"
             )
         messages.append("\n\n".join(msg_parts))
 
     # 4. Grade Posted / Updated alert
     if all_grades:
-        msg_parts = ["📊 **New Grade Posted / Updated**"]
+        msg_parts = ["[Grade] **New Grade Posted / Updated**"]
         for g in all_grades:
-            fb_part = f"\n  💬 *Feedback*: {g['feedback']}" if g['feedback'] else ""
+            fb_part = f"\n  *Feedback*: {g['feedback']}" if g['feedback'] else ""
             msg_parts.append(
-                f"• 📚 *Course*: {g['course']}\n"
-                f"  👨‍🏫 *Instructor*: {g['doctor']}\n"
-                f"  📝 *Assessment*: **{g['task']}**\n"
-                f"  🎯 *Grade*: **{g['score_str']}**{fb_part}"
+                f"• *Course*: {g['course']}\n"
+                f"  *Instructor*: {g['doctor']}\n"
+                f"  *Assessment*: **{g['task']}**\n"
+                f"  *Grade*: **{g['score_str']}**{fb_part}"
             )
         messages.append("\n\n".join(msg_parts))
 
     # 5. New announcements alert
     if all_announcements:
-        msg_parts = ["📢 **New Blackboard Announcement**"]
+        msg_parts = ["[Announcement] **New Blackboard Announcement**"]
         for an in all_announcements:
-            date_line = f"📅 *Posted*: {an['date']}\n" if an.get('date') else ""
+            date_line = f"*Posted*: {an['date']}\n" if an.get('date') else ""
             msg_parts.append(
-                f"📚 *Course*: {an['course']}\n"
-                f"👨‍🏫 *Instructor*: {an['doctor']}\n"
+                f"*Course*: {an['course']}\n"
+                f"*Instructor*: {an['doctor']}\n"
                 f"{date_line}"
-                f"📌 *Title*: **{an['title']}**\n\n"
+                f"*Title*: **{an['title']}**\n\n"
                 f"{an['body']}"
             )
         messages.append("\n\n---\n\n".join(msg_parts))
 
-    # Output to stdout and push to Telegram if updates exist (zero quota / silent otherwise)
+    # Output to stdout and push notifications if updates exist (zero quota / silent otherwise)
     manual_mode = "--manual" in sys.argv or "-m" in sys.argv
     if messages:
         combined_text = "\n\n---\n\n".join(messages).strip()
         print(combined_text)
-        send_telegram(combined_text)
+        send_notification(combined_text)
     elif manual_mode:
-        msg = "🛡️ **LMS Sentinel Check Completed**\nAll courses are up to date. No new requests, materials, deadlines, or grade changes detected."
+        msg = "[Status] **LMS Sentinel Check Completed**\nAll courses are up to date. No new requests, materials, deadlines, or grade changes detected."
         print(msg)
 
 

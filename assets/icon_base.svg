@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <!-- Blackboard Sentinel Shield Base -->
+  <path fill="#FFFFFF" fill-rule="evenodd" d="
+    M 128 64
+    L 384 64
+    C 424 64 440 88 440 128
+    L 440 240
+    C 440 376 288 444 256 456
+    C 224 444 72 376 72 240
+    L 72 128
+    C 72 88 88 64 128 64
+    Z
+    M 256 144
+    L 374 206
+    L 256 268
+    L 138 206
+    Z
+    M 158 244
+    L 256 296
+    L 354 244
+    L 354 308
+    C 354 344 298 376 256 392
+    C 214 376 158 344 158 308
+    Z
+  " />
+</svg>

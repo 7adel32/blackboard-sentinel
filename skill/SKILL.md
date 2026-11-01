@@ -1,6 +1,6 @@
 ---
 name: university-portal
-description: "University LMS deadlines, assignments, submissions, grades, and Blackboard tracking for University of Tabuk. Trigger whenever the user asks about deadlines, Deadlines, assignments, due dates, calendar, grades, or LMS."
+description: "University LMS deadlines, assignments, submissions, grades, and Blackboard tracking. Trigger whenever the user asks about deadlines, Deadlines, assignments, due dates, calendar, grades, or LMS."
 version: 1.1.0
 tags: [LMS, University, Grades, Deadlines, Academic, Blackboard]
 ---

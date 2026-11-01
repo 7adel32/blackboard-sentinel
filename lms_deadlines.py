@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Manual On-Demand LMS Deadlines Viewer
-University of Tabuk - Master's in Artificial Intelligence
+University Academic LMS Portal
 """
 
 import sys
@@ -11,12 +11,22 @@ import subprocess
 import json
 from datetime import datetime, timezone, timedelta
 
-sys.path.append(os.path.expanduser("~/.hermes/scripts"))
-from check_lms import LMSClient, USER_ID, PASSWORD, get_courses_map, AST_TZ
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+hermes_scripts = os.path.expanduser("~/.hermes/scripts")
+if os.path.exists(hermes_scripts) and hermes_scripts not in sys.path:
+    sys.path.append(hermes_scripts)
+
+from check_lms import LMSClient, get_courses_map, AST_TZ, init_config, is_configured
+import check_lms
 
 
 def get_deadlines():
-    client = LMSClient(USER_ID, PASSWORD)
+    init_config()
+    if not is_configured():
+        raise RuntimeError("LMS credentials not configured in .env or environment.")
+    client = LMSClient(check_lms.USER_ID, check_lms.PASSWORD)
     client.login()
     now = datetime.now(timezone.utc)
 
@@ -39,7 +49,8 @@ def get_deadlines():
                 }
 
     # 2. Gradebook Columns
-    for cid in COURSES_MAP.keys():
+    courses_map = get_courses_map(client)
+    for cid in courses_map.keys():
         cols = client.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns")
         if cols and "results" in cols:
             for c in cols["results"]:
@@ -120,15 +131,15 @@ def main():
     items = get_deadlines()
 
     if not items:
-        out = "📅 **LMS Upcoming Deadlines**\n\nNo upcoming active deadlines found on Blackboard."
+        out = "[Deadlines] LMS Upcoming Deadlines\n\nNo upcoming active deadlines found on Blackboard."
     else:
-        lines = ["📅 **Upcoming LMS Deadlines**\n"]
+        lines = ["[Deadlines] Upcoming LMS Deadlines\n"]
         for i, it in enumerate(items, 1):
             lines.append(
-                f"{i}. 📝 **{it['title']}**\n"
-                f"   📚 *Course*: {it['course']}\n"
-                f"   👨‍🏫 *Instructor*: {it['doctor']}\n"
-                f"   ⏳ *Due*: {it['due_str']} ({it['countdown']})\n"
+                f"{i}. [Task] **{it['title']}**\n"
+                f"   *Course*: {it['course']}\n"
+                f"   *Instructor*: {it['doctor']}\n"
+                f"   *Due*: {it['due_str']} ({it['countdown']})\n"
             )
         out = "\n".join(lines).strip()
 

@@ -2,7 +2,7 @@
 set -e
 
 echo "=========================================================="
-echo "   🎓 University LMS Portal Skill & Sentinel Installer    "
+echo "      University LMS Portal Skill & Sentinel Installer    "
 echo "=========================================================="
 echo ""
 
@@ -84,4 +84,4 @@ if command -v hermes &> /dev/null; then
 fi
 
 echo ""
-echo "✅ Installation complete! Everything is configured."
+echo "Installation complete! Everything is configured."

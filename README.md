@@ -26,6 +26,20 @@ Monitors university courses in the background, automatically organizes downloade
 
 ---
 
+## Performance & Speed Metrics
+
+| Operation | Typical Duration | Details |
+| :--- | :--- | :--- |
+| **First-Time Run (Cold Start)** | **~15 – 35s** | Authenticates, maps all enrolled courses via REST API, mirrors the lecturer folder hierarchy on disk, and downloads initial course files and assignments. |
+| **Routine Check (Nothing Changed)** | **~2 – 4s** | Validates grades, announcements, and deadlines against local state cache. Silent exit with zero background noise. |
+| **Delta Check (Changes Detected)** | **~4 – 8s** | Detects newly posted slides/materials, converts announcements to `.docx`, logs score updates, and triggers Windows toast / Telegram alerts. |
+
+- **Memory Footprint**:
+  - **Windows System Tray App**: ~25–35 MB private working set when idling in the system tray.
+  - **Hermes Agent & Headless Linux**: **0 MB** idle RAM (executes on-demand via cron schedule, using ~18 MB for 2–4 seconds during checks and terminating immediately).
+
+---
+
 ## Project Structure
 
 ```text

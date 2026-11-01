@@ -1,6 +1,6 @@
 # Blackboard Sentinel
 
-An automated course synchronizer, deadline monitor, and grade tracker for **Blackboard Learn Ultra (SaaS)** portals.
+An automated course synchronizer and tracker for **Blackboard Learn Ultra** portals.
 
 Monitors university courses in the background, automatically organizes downloaded slides/materials and assignment files into clean subject folders, and alerts you via instant messaging (Hermes Agent / Telegram) and native Windows toast notifications when new grades, announcements, materials, or upcoming deadlines appear.
 
@@ -10,15 +10,14 @@ Monitors university courses in the background, automatically organizes downloade
 
 - **Dynamic Course Discovery**: Automatically inspects enrolled courses directly via Blackboard's REST API and creates course folders named after each course.
 - **Dual-Source Content Discovery**:
-  - Traverses standard content folders, learning modules, and slide attachments.
+  - Traverses standard content folders, learning modules, and slide attachments and downloads files in the same order they appear on the online portal.
   - Inspects assignment instructions and tests (`data-bbfile` JSON payloads) to extract homework files and project briefs that naive scrapers miss.
 - **Authoritative Deadline Tracking**: Merges Blackboard calendar items with the gradebook's authoritative `grading.due` column, clamping requests to avoid API date-window drops.
 - **Grade & Feedback Sentinel**: Tracks grade releases, score updates, status transitions (`NeedsGrading` -> `Graded`), and instructor feedback comments.
 - **Minimal Resource Footprint**:
   - **Windows Tray App**: Sits idle in the notification area at only ~25–35 MB RAM.
   - **Hermes Agent & Linux**: **0 MB** idle RAM (runs on-demand via `hermes cron`, taking ~18 MB for 3–5 seconds during checks and terminating immediately).
-- **Zero-Quota & Silent**: Operates purely with standard Python HTTP requests. Dispatches notifications only when updates are found; silent when nothing changes.
-- **Cross-Platform**:
+- **Zero-Quota & Silent**: Operates purely with standard Python HTTP requests. Dispatches notifications when updates are found.
   - **Windows System Tray App**: Sits in notification area as a real-time status indicator with dynamic state tinting, waiting animation, and quick-action menu.
   - **Windows Headless Background Task**: Runs silently via Windows Task Scheduler with zero RAM footprint when idle.
   - **Hermes Agent & Linux**: 24/7 background scheduler (`hermes cron`) inside WSL/Ubuntu with Telegram push notifications.
@@ -31,7 +30,7 @@ Monitors university courses in the background, automatically organizes downloade
 | Operation | Typical Duration | Details |
 | :--- | :--- | :--- |
 | **First-Time Run (Cold Start)** | **~15 – 35s** | Authenticates, maps all enrolled courses via REST API, mirrors the lecturer folder hierarchy on disk, and downloads initial course files and assignments. |
-| **Routine Check (Nothing Changed)** | **~2 – 4s** | Validates grades, announcements, and deadlines against local state cache. Silent exit with zero background noise. |
+| **Routine Check (Nothing Changed)** | **~2 – 4s** | Validates grades, announcements, and deadlines against local state cache. Silent exit. |
 | **Delta Check (Changes Detected)** | **~4 – 8s** | Detects newly posted slides/materials, converts announcements to `.docx`, logs score updates, and triggers Windows toast / Telegram alerts. |
 
 - **Memory Footprint**:

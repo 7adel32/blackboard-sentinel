@@ -43,7 +43,8 @@ class SentinelTrayApp:
 
     def get_tooltip(self):
         if self.current_state == TrayIconTheme.STATE_WORKING:
-            return "Blackboard Sentinel: Checking LMS..."
+            msg = self.last_status_message or "Checking LMS..."
+            return f"Blackboard Sentinel: {msg}"
         elif self.current_state == TrayIconTheme.STATE_NOT_CONFIGURED:
             return "Blackboard Sentinel: Not Configured (Missing .env)"
         elif self.current_state == TrayIconTheme.STATE_ERROR:
@@ -195,6 +196,8 @@ class SentinelTrayApp:
 
     def on_view_deadlines(self, icon, item):
         def _fetch_and_show():
+            prev_state = self.current_state
+            self.set_state(TrayIconTheme.STATE_WORKING, "Loading upcoming deadlines...")
             try:
                 import lms_deadlines
                 items = lms_deadlines.get_deadlines()
@@ -210,14 +213,18 @@ class SentinelTrayApp:
                             f"   Due: {it['due_str']} ({it['countdown']})\n"
                         )
                     txt = "\n".join(lines).strip()
+                self.set_state(prev_state if prev_state != TrayIconTheme.STATE_WORKING else TrayIconTheme.STATE_SYNCED)
             except Exception as e:
                 txt = f"Error loading deadlines:\n{e}"
+                self.set_state(TrayIconTheme.STATE_ERROR, str(e))
             from config_gui import show_info_window
             show_info_window("Upcoming Deadlines", txt)
         threading.Thread(target=_fetch_and_show, daemon=True).start()
 
     def on_view_grades(self, icon, item):
         def _fetch_and_show():
+            prev_state = self.current_state
+            self.set_state(TrayIconTheme.STATE_WORKING, "Loading grades & feedback...")
             try:
                 import lms_grades
                 data = lms_grades.get_all_grades()
@@ -243,8 +250,10 @@ class SentinelTrayApp:
                             lines.append(f"     Feedback: {g['feedback']}")
                     lines.append("")
                 txt = "\n".join(lines).strip()
+                self.set_state(prev_state if prev_state != TrayIconTheme.STATE_WORKING else TrayIconTheme.STATE_SYNCED)
             except Exception as e:
                 txt = f"Error loading grades:\n{e}"
+                self.set_state(TrayIconTheme.STATE_ERROR, str(e))
             from config_gui import show_info_window
             show_info_window("Grades & Feedback", txt)
         threading.Thread(target=_fetch_and_show, daemon=True).start()

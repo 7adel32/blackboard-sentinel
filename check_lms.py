@@ -808,7 +808,6 @@ def check_and_download_course_files(client, cid, info, state):
                 req_key = f"{cid}_{item_id}"
                 req_folder_name = get_request_folder_name(title)
                 req_dir = os.path.join(base_dir, req_folder_name)
-                llm_dir = os.path.join(base_dir, f"{req_folder_name} llm")
                 is_new_req = req_key not in seen_requests_set
                 current_req = {
                     "req_key": req_key,
@@ -820,7 +819,6 @@ def check_and_download_course_files(client, cid, info, state):
                     "raw_title": re.sub(r'[\u200e\u200f\u202a-\u202e]', "", title).strip(),
                     "req_folder_name": req_folder_name,
                     "req_dir": req_dir,
-                    "llm_dir": llm_dir,
                     "created": item.get("created", ""),
                     "is_new": is_new_req,
                     "instructions_parts": [],
@@ -887,7 +885,6 @@ def check_and_download_course_files(client, cid, info, state):
                 seen_requests_set.add(current_req["req_key"])
                 if current_req["is_new"]:
                     os.makedirs(current_req["req_dir"], exist_ok=True)
-                    os.makedirs(current_req["llm_dir"], exist_ok=True)
                     for existing_fn in os.listdir(current_req["req_dir"]):
                         if existing_fn != "blackboard_instructions.md" and existing_fn not in current_req["files"]:
                             current_req["files"].append(existing_fn)

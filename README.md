@@ -65,7 +65,7 @@ The Windows Tray App uses a pure white silhouette vector base (`assets/icon_base
 
 ## Quick Start
 
-### 1. Windows Installation
+### 1. Windows Installation (Recommended)
 
 1. **Download the Setup Executable**:
    Download **`BlackboardSentinelSetup.exe`** from the [Latest Release](https://github.com/7adel32/blackboard-sentinel/releases/latest).
@@ -91,25 +91,22 @@ To uninstall:
 
 ---
 
-### 2. Hermes Agent Setup (WSL / Linux)
+### 2. Standalone Manual CLI (Cross-Platform)
 
-If you run [Hermes Agent](https://github.com/NousResearch/hermes-agent):
-```bash
-git clone https://github.com/<your-username>/blackboard-sentinel.git
-cd blackboard-sentinel
-./install.sh
-```
-The installer prompts for credentials, installs the scripts and skill to `~/.hermes/`, and registers the hourly cron job with Telegram notifications automatically.
+For headless servers, Linux, or command-line usage without the desktop tray:
 
----
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/7adel32/blackboard-sentinel.git
+   cd blackboard-sentinel
+   pip install -r requirements.txt
+   ```
 
-### 3. Standalone Manual CLI
-
-1. **Configure environment variables:**
+2. **Configure credentials:**
    ```bash
    cp .env.example .env
    ```
-   Edit `.env` with your login details:
+   Edit `.env` with your portal details:
    ```env
    LMS_URL="https://lms.university.edu"
    LMS_USER_ID="your_student_id"
@@ -117,7 +114,7 @@ The installer prompts for credentials, installs the scripts and skill to `~/.her
    LMS_STORAGE_DIR="~/Documents/University"
    ```
 
-2. **Run on-demand:**
+3. **Run on-demand:**
    ```bash
    # Check updates and sync course materials:
    python check_lms.py --manual
@@ -125,9 +122,25 @@ The installer prompts for credentials, installs the scripts and skill to `~/.her
    # View upcoming deadlines:
    python lms_deadlines.py
 
-   # View grades & feedback:
+   # View grades and feedback:
    python lms_grades.py
    ```
+
+---
+
+## 24/7 Telegram Notifications via Hermes Agent (Optional)
+
+If you run [Hermes Agent](https://github.com/NousResearch/hermes-agent) on Linux or WSL with Telegram configured, you can run Sentinel as an automated 24/7 background watchdog:
+
+```bash
+chmod +x install.sh && ./install.sh
+```
+
+The installer:
+1. Prompts for credentials (or reads existing `.env` from `~/.hermes/.env`).
+2. Copies sentinel scripts to `~/.hermes/scripts/`.
+3. Installs the `university-portal` skill to `~/.hermes/skills/`.
+4. Automatically registers an hourly cron job (`lms-sentinel`) with origin Telegram delivery.
 
 ---
 

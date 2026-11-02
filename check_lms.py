@@ -245,8 +245,9 @@ def send_windows_toast(title, message):
 def send_notification(text, title="Blackboard Sentinel"):
     if not text:
         return
-    # 1. Hermes / Chat push (always to origin)
-    send_to_chat(text)
+    # 1. Hermes / Chat push (opt-in, default off)
+    if os.getenv("LMS_HERMES_MESSAGING", "false").strip().lower() in ("true", "1", "yes"):
+        send_to_chat(text)
     # 2. Windows Native Toast alert
     if sys.platform == "win32":
         send_windows_toast(title, text)

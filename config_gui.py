@@ -33,7 +33,8 @@ def load_existing_config():
         "LMS_STORAGE_DIR": os.path.join(os.path.expanduser("~"), "Documents", "University"),
         "LMS_COURSES": "",
         "TRAY_THEME": "auto",
-        "LMS_KEEP_ALL_ANNOUNCEMENTS": "false"
+        "LMS_KEEP_ALL_ANNOUNCEMENTS": "false",
+        "LMS_HERMES_MESSAGING": "false"
     }
     for p in paths:
         if os.path.isfile(p):
@@ -163,6 +164,16 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         variable=keep_announcements_var
     )
     chk_ann.pack(anchor="w", pady=(6, 2))
+
+    hermes_var = tk.BooleanVar(
+        value=current_data.get("LMS_HERMES_MESSAGING", "false").lower() in ("true", "1", "yes")
+    )
+    chk_hermes = ttk.Checkbutton(
+        form1,
+        text="Send updates via Hermes messaging",
+        variable=hermes_var
+    )
+    chk_hermes.pack(anchor="w", pady=(2, 2))
 
     lbl_ann_hint = tk.Label(
         form1,
@@ -421,6 +432,7 @@ def show_config_dialog(on_saved_callback=None, parent=None):
 
         courses_str = ",".join(selected_cids)
         keep_ann = "true" if keep_announcements_var.get() else "false"
+        hermes_msg = "true" if hermes_var.get() else "false"
         os.makedirs(lms_folder, exist_ok=True)
 
         env_content = f"""# Blackboard Sentinel Configuration
@@ -431,6 +443,7 @@ LMS_STORAGE_DIR="{lms_folder}"
 LMS_COURSES="{courses_str}"
 TRAY_THEME="{theme_choice}"
 LMS_KEEP_ALL_ANNOUNCEMENTS="{keep_ann}"
+LMS_HERMES_MESSAGING="{hermes_msg}"
 """
         # Save to AppData and local .env
         appdata_env = get_default_config_path()
@@ -455,6 +468,7 @@ LMS_KEEP_ALL_ANNOUNCEMENTS="{keep_ann}"
         os.environ["LMS_COURSES"] = courses_str
         os.environ["TRAY_THEME"] = theme_choice
         os.environ["LMS_KEEP_ALL_ANNOUNCEMENTS"] = keep_ann
+        os.environ["LMS_HERMES_MESSAGING"] = hermes_msg
 
         check_lms.init_config()
         saved_flag["saved"] = True

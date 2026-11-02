@@ -4,6 +4,7 @@ from PyInstaller.utils.hooks import collect_data_files
 datas = [
     ('dist/BlackboardSentinel.exe', '.'),
     ('dist/uninstall.exe', '.'),
+    ('dist/BlackboardSentinelCLI.exe', '.'),
     ('assets', 'assets')
 ]
 
@@ -43,3 +44,4 @@ exe = EXE(
     entitlements_file=None,
     icon=['assets/icon_app.ico'],
 )
+

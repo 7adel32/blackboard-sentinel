@@ -97,7 +97,7 @@ def register_in_add_remove(install_dir, installed_exe, installed_uninst):
     try:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, reg_key) as key:
             winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Blackboard Sentinel")
-            winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "1.0.0")
+            winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "1.1.0")
             winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, "Developer")
             winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, install_dir)
             winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, f"{installed_exe},0")
@@ -128,6 +128,13 @@ def perform_install(status_callback=None):
     installed_exe = os.path.join(install_dir, "BlackboardSentinel.exe")
     if src_main and os.path.abspath(src_main) != os.path.abspath(installed_exe):
         shutil.copy2(src_main, installed_exe)
+
+    # 1b. Copy console CLI runner (optional)
+    src_cli = get_source_exe("BlackboardSentinelCLI.exe")
+    if src_cli:
+        installed_cli = os.path.join(install_dir, "BlackboardSentinelCLI.exe")
+        if os.path.abspath(src_cli) != os.path.abspath(installed_cli):
+            shutil.copy2(src_cli, installed_cli)
 
     # 2. Copy uninstall.exe
     src_uninst = get_source_exe("uninstall.exe")

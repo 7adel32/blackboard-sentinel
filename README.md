@@ -57,6 +57,7 @@ blackboard-sentinel/
 ├── check_lms.py          # Main sentinel engine (syncs files, tracks deadlines & grades)
 ├── lms_deadlines.py      # Quick CLI helper for upcoming deadlines
 ├── lms_grades.py         # Quick CLI helper for recent grades & feedback
+├── cli.py                # Console runner (BlackboardSentinelCLI.exe) with simple subcommands
 ├── tray_app.py           # Windows System Tray resident application
 ├── tray_icon.py          # State-driven tinting and animation engine
 ├── install.ps1           # Windows installer (Tray App or Task Scheduler)
@@ -171,6 +172,22 @@ The installer:
 2. Copies sentinel scripts to `~/.hermes/scripts/`.
 3. Installs the `university-portal` skill to `~/.hermes/skills/`.
 4. Automatically registers an hourly cron job (`lms-sentinel`) with `--deliver origin` delivery (defaulting to WhatsApp).
+
+---
+
+## Command-Line Runner (for scripts and agents)
+
+`BlackboardSentinelCLI.exe` is a console build with plain subcommands, so scripts and automated agents never need to drive the tray app or its windows. It is installed next to the tray app by the setup installer.
+
+| Command | What it does |
+| :--- | :--- |
+| `BlackboardSentinelCLI status [--json]` | Show configuration state and cached deadline count (no network) |
+| `BlackboardSentinelCLI check` | Run a full sync now |
+| `BlackboardSentinelCLI deadlines [--json] [--notify]` | Upcoming deadlines with `SUBMITTED` / `NOT SUBMITTED` status |
+| `BlackboardSentinelCLI grades [--json] [--notify]` | Current grades and feedback |
+| `BlackboardSentinelCLI courses [--json]` | Monitored courses |
+
+Exit code is `0` on success and `1` on error, with a single `ERROR: ...` line on stderr.
 
 ---
 

@@ -1598,7 +1598,14 @@ def sync_all_courses(client, state, courses_dict):
     """Sync every course (parallel per LMS_MAX_WORKERS) and merge results into state.
     Returns (downloads, new_requests, announcements, external_links)."""
     all_downloads, all_new_requests, all_announcements, all_external_links = [], [], [], []
-    all_downloads, all_new_requests, all_announcements, all_external_links = sync_all_courses(client, state, courses_dict)
+    course_items = list(courses_dict.items())
+    course_results = _parallel_map(lambda ci: _sync_course(client, ci[0], ci[1], state), course_items)
+    for res in course_results:
+        _merge_course_state(state, res["state"])
+        all_downloads.extend(res["downloads"])
+        all_new_requests.extend(res["requests"])
+        all_external_links.extend(res["links"])
+        all_announcements.extend(res["announcements"])
     return all_downloads, all_new_requests, all_announcements, all_external_links
 
 
@@ -1617,21 +1624,8 @@ def main():
         sys.stderr.write(f"LMS login error: {e}\n")
         sys.exit(1)
 
-    all_downloads = []
-    all_new_requests = []
-    all_announcements = []
-
-    all_external_links = []
-
     courses_dict = get_courses_map(client)
-    course_items = list(courses_dict.items())
-    course_results = _parallel_map(lambda ci: _sync_course(client, ci[0], ci[1], state), course_items)
-    for res in course_results:
-        _merge_course_state(state, res["state"])
-        all_downloads.extend(res["downloads"])
-        all_new_requests.extend(res["requests"])
-        all_external_links.extend(res["links"])
-        all_announcements.extend(res["announcements"])
+    all_downloads, all_new_requests, all_announcements, all_external_links = sync_all_courses(client, state, courses_dict)
 
     all_grades = check_grades(client, state, courses_map=courses_dict)
     all_deadlines = check_deadlines(client, state, courses_map=courses_dict)

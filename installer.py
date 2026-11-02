@@ -159,10 +159,8 @@ def perform_install(status_callback=None):
     update_status("Registering in Windows Settings...")
     register_in_add_remove(install_dir, installed_exe, installed_uninst)
 
-    # 5. Launch updated application
-    update_status("Launching application...")
-    if os.path.exists(installed_exe):
-        subprocess.Popen([installed_exe], cwd=install_dir, close_fds=True)
+    # 5. Complete without direct shell execution
+    update_status("Shortcuts created. Launch via Start Menu or tray.")
 
     update_status("Installation complete.")
     return True

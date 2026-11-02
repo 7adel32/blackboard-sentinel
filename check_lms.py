@@ -1023,7 +1023,10 @@ def submission_status(grade_entry):
         return "UNVERIFIED"
     if grade_entry.get("status") == "Graded" or grade_entry.get("score") is not None:
         return "GRADED"
-    if grade_entry.get("status") == "NeedsGrading":
+    # An open/in-progress attempt without final submission is still NOT SUBMITTED
+    if grade_entry.get("attempt_status") == "InProgress":
+        return "NOT SUBMITTED"
+    if grade_entry.get("status") == "NeedsGrading" or grade_entry.get("attempt_status") in ("NeedsGrading", "Submitted", "Completed"):
         return "SUBMITTED"
     return "NOT SUBMITTED"
 
@@ -1499,8 +1502,22 @@ def check_grades(client, state, courses_map=None, student_user_id=None):
         tasks
     )
 
-    # Stage 3: compare against saved state sequentially (deterministic order, no shared-state races)
+    # Stage 2b: inspect attempt status for pending items to verify real submission vs in-progress draft
+    attempt_tasks = []
     for (cid, info, col), grade_data in zip(tasks, grade_results):
+        status = grade_data.get("status") if grade_data else None
+        if status == "NeedsGrading" or (grade_data and grade_data.get("displayGrade", {}).get("score") is None):
+            attempt_tasks.append((cid, col.get("id")))
+        else:
+            attempt_tasks.append(None)
+
+    attempt_results = _parallel_map(
+        lambda at: client.get_json(f"/learn/api/public/v1/courses/{at[0]}/gradebook/columns/{at[1]}/attempts") if at else None,
+        attempt_tasks
+    )
+
+    # Stage 3: compare against saved state sequentially (deterministic order, no shared-state races)
+    for (cid, info, col), grade_data, att_data in zip(tasks, grade_results, attempt_results):
         col_id = col.get("id")
         col_name = col.get("name") or "Grade Item"
         grade_key = f"{cid}_{col_id}"
@@ -1550,12 +1567,17 @@ def check_grades(client, state, courses_map=None, student_user_id=None):
                 "feedback": feedback
             })
 
+        attempt_status = None
+        if att_data and "results" in att_data and att_data["results"]:
+            attempt_status = att_data["results"][-1].get("status")
+
         seen_grades[grade_key] = {
             "course": f"{info['name']} ({info['code']})",
             "name": col_name,
             "score": score,
             "possible": possible,
             "status": status,
+            "attempt_status": attempt_status,
             "feedback": feedback
         }
 

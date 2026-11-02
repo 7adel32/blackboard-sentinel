@@ -76,6 +76,10 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     root.configure(bg=bg_color)
 
     current_data = load_existing_config()
+    is_settings = bool(current_data.get("LMS_URL") and current_data.get("LMS_USER_ID") and current_data.get("LMS_PASSWORD"))
+    next_text = "Apply Settings" if is_settings else "Connect & Choose Subjects ->"
+    if is_settings:
+        root.title("Blackboard Sentinel - Settings")
 
     # Dynamic state
     discovered_courses = []
@@ -92,7 +96,7 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     header1 = tk.Frame(step1_frame, bg=bg_color, padx=24, pady=16)
     header1.pack(fill="x")
 
-    lbl_t1 = tk.Label(header1, text="Blackboard Sentinel Configuration", font=("Segoe UI", 13, "bold"), bg=bg_color, fg="#0F172A")
+    lbl_t1 = tk.Label(header1, text=("Blackboard Sentinel Settings" if is_settings else "Blackboard Sentinel Configuration"), font=("Segoe UI", 13, "bold"), bg=bg_color, fg="#0F172A")
     lbl_t1.pack(anchor="w")
     lbl_s1 = tk.Label(header1, text="Enter your LMS credentials and choose your course storage folder.", font=("Segoe UI", 9), bg=bg_color, fg="#64748B")
     lbl_s1.pack(anchor="w", pady=(2, 0))
@@ -175,17 +179,6 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     )
     chk_hermes.pack(anchor="w", pady=(2, 2))
 
-    lbl_ann_hint = tk.Label(
-        form1,
-        text="Create an Announcements folder in each subject that keeps track of all announcements and converts them to word documents (.docx)",
-        font=("Segoe UI", 8),
-        bg=card_bg,
-        fg="#64748B",
-        justify="left",
-        wraplength=460
-    )
-    lbl_ann_hint.pack(anchor="w", padx=(20, 0), pady=(0, 6))
-
     btn_bar1 = tk.Frame(step1_frame, bg=bg_color, padx=24, pady=8)
     btn_bar1.pack(fill="x", side="bottom")
 
@@ -194,7 +187,7 @@ def show_config_dialog(on_saved_callback=None, parent=None):
 
     btn_next = tk.Button(
         btn_bar1,
-        text="Connect & Choose Subjects ->",
+        text=next_text,
         font=("Segoe UI", 9, "bold"),
         bg=accent_color,
         fg="#FFFFFF",
@@ -204,6 +197,20 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         cursor="hand2"
     )
     btn_next.pack(side="right")
+
+    btn_choose = tk.Button(
+        btn_bar1,
+        text="Choose Subjects",
+        font=("Segoe UI", 9),
+        bg="#E2E8F0",
+        fg="#334155",
+        relief="flat",
+        padx=12,
+        pady=6,
+        cursor="hand2"
+    )
+    if is_settings:
+        btn_choose.pack(side="right", padx=(0, 8))
 
     # =========================================================================
     # STEP 2: SUBJECT SELECTION (RECENT TO ANCIENT)
@@ -293,7 +300,7 @@ def show_config_dialog(on_saved_callback=None, parent=None):
 
     btn_save = tk.Button(
         btn_bar2,
-        text="Save & Start Sentinel",
+        text=("Done" if is_settings else "Save & Start Sentinel"),
         font=("Segoe UI", 9, "bold"),
         bg=accent_color,
         fg="#FFFFFF",
@@ -331,7 +338,8 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         lms_url = clean_url
 
         status_lbl1.config(text="Verifying portal and logging into Blackboard...", fg="#2563EB")
-        btn_next.config(state="disabled", text="Connecting...")
+        btn_next.config(state="disabled", text=("Connecting..." if not is_settings else next_text))
+        btn_choose.config(state="disabled")
         root.update()
 
         def _fetch_worker():
@@ -352,14 +360,16 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         threading.Thread(target=_fetch_worker, daemon=True).start()
 
     def _on_fetch_error(err_msg):
-        btn_next.config(state="normal", text="Connect & Choose Subjects ->")
+        btn_next.config(state="normal", text=next_text)
+        btn_choose.config(state="normal")
         status_lbl1.config(text="")
         messagebox.showerror("Connection Error", f"Failed to connect to Blackboard:\n{err_msg}", parent=root)
 
     def _on_fetch_success(courses):
         nonlocal discovered_courses
         discovered_courses = courses
-        btn_next.config(state="normal", text="Connect & Choose Subjects ->")
+        btn_next.config(state="normal", text=next_text)
+        btn_choose.config(state="normal")
         status_lbl1.config(text="")
 
         if not courses:
@@ -425,8 +435,11 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         else:
             theme_choice = "auto"
 
-        selected_cids = [cid for cid, v in course_vars.items() if v.get()]
-        if not selected_cids:
+        if is_settings and not course_vars:
+            selected_cids = [x.strip() for x in current_data.get("LMS_COURSES", "").split(",") if x.strip()]
+        else:
+            selected_cids = [cid for cid, v in course_vars.items() if v.get()]
+        if not selected_cids and not is_settings:
             if not messagebox.askyesno("No Courses Selected", "You have not selected any courses to monitor. Continue anyway?", parent=root):
                 return
 
@@ -476,9 +489,19 @@ LMS_HERMES_MESSAGING="{hermes_msg}"
         if on_saved_callback:
             on_saved_callback()
 
-    btn_next.config(command=go_to_step2)
+    if is_settings:
+        def apply_settings():
+            if not (url_var.get().strip() and user_var.get().strip() and pass_var.get().strip()):
+                messagebox.showerror("Missing Information", "Please enter LMS URL, Student ID, and Password.", parent=root)
+                return
+            save_final_config()
+        btn_next.config(command=apply_settings)
+        btn_choose.config(command=go_to_step2)
+        btn_save.config(command=go_back_to_step1)
+    else:
+        btn_next.config(command=go_to_step2)
+        btn_save.config(command=save_final_config)
     btn_back.config(command=go_back_to_step1)
-    btn_save.config(command=save_final_config)
 
     # Initial view
     step1_frame.pack(fill="both", expand=True)

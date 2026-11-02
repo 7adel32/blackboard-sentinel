@@ -1672,6 +1672,27 @@ def main():
         msg = "[Status] **LMS Sentinel Check Completed**\nAll courses are up to date. No new requests, materials, deadlines, or grade changes detected."
         print(msg)
 
+    # Check if a detached request solver hook exists (e.g. solver.py in ~/.hermes/scripts/)
+    if all_new_requests:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        solver_script = os.path.join(script_dir, "solver.py")
+        if os.path.exists(solver_script):
+            try:
+                os.makedirs(LOGS_DIR, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                queue_file = os.path.join(LOGS_DIR, f"pending_requests_{ts}.json")
+                with open(queue_file, "w", encoding="utf-8") as qf:
+                    json.dump(all_new_requests, qf, ensure_ascii=False, indent=2)
+                subprocess.Popen(
+                    [sys.executable, solver_script, queue_file],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except Exception as se:
+                sys.stderr.write(f"Solver hook dispatch error: {se}\n")
+
+
 
 def format_update_messages(all_downloads, all_new_requests, all_announcements, all_grades, all_deadlines, all_external_links):
     messages = []

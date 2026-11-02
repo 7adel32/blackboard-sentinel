@@ -22,7 +22,7 @@ from tray_icon import TrayIconTheme
 
 class SentinelTrayApp:
     def __init__(self, check_interval_minutes=60):
-        self.check_interval_seconds = check_interval_minutes * 60
+        self.check_interval_seconds = max(10, check_interval_minutes) * 60  # never poll more often than every 10 minutes
         self.theme = TrayIconTheme(target_size=64)
         
         check_lms.init_config()
@@ -118,19 +118,8 @@ class SentinelTrayApp:
             client = check_lms.LMSClient(check_lms.USER_ID, check_lms.PASSWORD)
             client.login()
 
-            all_downloads = []
-            all_new_requests = []
-            all_announcements = []
-            all_external_links = []
-
             courses_dict = check_lms.get_courses_map(client)
-            for cid, info in courses_dict.items():
-                dl, new_reqs, ext_links = check_lms.check_and_download_course_files(client, cid, info, state)
-                all_downloads.extend(dl)
-                all_new_requests.extend(new_reqs)
-                all_external_links.extend(ext_links)
-                ann = check_lms.check_announcements(client, cid, info, state, new_requests=all_new_requests)
-                all_announcements.extend(ann)
+            all_downloads, all_new_requests, all_announcements, all_external_links = check_lms.sync_all_courses(client, state, courses_dict)
 
             all_grades = check_lms.check_grades(client, state, courses_map=courses_dict)
             all_deadlines = check_deadlines_list = check_lms.check_deadlines(client, state, courses_map=courses_dict)
@@ -182,17 +171,38 @@ class SentinelTrayApp:
         finally:
             self.is_checking = False
 
+    def run_cached_reminders(self):
+        """Evaluate deadline reminders from the local cache (no network, no login)."""
+        if self.is_checking:
+            return
+        try:
+            state = check_lms.load_state()
+            alerts = check_lms.check_cached_reminders(state)
+            if not alerts:
+                return
+            check_lms.save_state(state)
+            messages = check_lms.format_update_messages([], [], [], [], alerts, [])
+            if messages:
+                check_lms.send_notification("\n\n---\n\n".join(messages).strip(), "Blackboard Sentinel")
+        except Exception:
+            pass
+
     def scheduler_loop(self):
-        """Background thread executing periodic checks."""
+        """Background thread executing periodic checks plus cheap offline deadline reminders."""
         # Initial check after 5 seconds of launch
         time.sleep(5)
+        reminder_interval = 3600  # seconds; offline, only reads the local state file
         while self.is_running:
             self.trigger_check_async()
             # Wait for next interval in small slices to respond quickly to shutdown
-            for _ in range(int(self.check_interval_seconds / 2)):
+            elapsed = 0
+            while elapsed < self.check_interval_seconds:
                 if not self.is_running:
                     return
                 time.sleep(2)
+                elapsed += 2
+                if elapsed % reminder_interval == 0:
+                    self.run_cached_reminders()
 
     # Context Menu Actions
     def on_check_now(self, icon, item):
@@ -223,6 +233,7 @@ class SentinelTrayApp:
                             f"   Course: {it['course']}\n"
                             f"   Instructor: {it['doctor']}\n"
                             f"   Due: {it['due_str']} ({it['countdown']})\n"
+                            f"   Status: {it['submission']}\n"
                         )
                     txt = "\n".join(lines).strip()
                 self.set_state(prev_state if prev_state != TrayIconTheme.STATE_WORKING else TrayIconTheme.STATE_SYNCED)

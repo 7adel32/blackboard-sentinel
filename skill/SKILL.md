@@ -28,3 +28,13 @@ Execute the dedicated Python script immediately via the terminal tool and reply 
      python3 ~/.hermes/scripts/lms_grades.py
      ```
    - Reply directly with the script output.
+
+## Reply Notes
+
+- Each deadline entry includes a Status: line: SUBMITTED, NOT SUBMITTED, or UNVERIFIED (no gradebook record). Graded items are omitted. Mention clearly when an upcoming item is NOT SUBMITTED.
+- The sentinel cron job (`check_lms.py`) also writes a local deadline cache that offline reminder checks can read without calling the portal.
+
+## Optional Environment Settings (`~/.hermes/.env`)
+
+- `LMS_MAX_WORKERS`: parallel course checking threads. `0` (default) = unlimited (capped at 16 internally), `1` = sequential for very old single-core machines.
+- `LMS_MAX_FILE_SIZE_MB`: skip downloading files larger than this size. `0` (default) = disabled.

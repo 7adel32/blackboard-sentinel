@@ -34,7 +34,8 @@ def load_existing_config():
         "LMS_COURSES": "",
         "TRAY_THEME": "auto",
         "LMS_KEEP_ALL_ANNOUNCEMENTS": "false",
-        "LMS_HERMES_MESSAGING": "false"
+        "LMS_HERMES_MESSAGING": "false",
+        "LMS_MAX_FILE_SIZE_MB": "0"
     }
     for p in paths:
         if os.path.isfile(p):
@@ -58,7 +59,7 @@ def load_existing_config():
 def show_config_dialog(on_saved_callback=None, parent=None):
     root = tk.Toplevel(parent) if parent else tk.Tk()
     root.title("Blackboard Sentinel - Setup")
-    root.geometry("560x620")
+    root.geometry("560x680")
     root.minsize(500, 520)
 
     # Use high-contrast app icon for title bar
@@ -178,6 +179,13 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         variable=hermes_var
     )
     chk_hermes.pack(anchor="w", pady=(2, 2))
+
+    # 8. Optional size cap (off by default)
+    size_frame = tk.Frame(form1, bg=card_bg)
+    size_frame.pack(fill="x", pady=(8, 2))
+    tk.Label(size_frame, text="Skip files larger than (MB, 0 = off)", font=("Segoe UI", 9, "bold"), bg=card_bg, fg="#334155").pack(side="left")
+    max_mb_var = tk.StringVar(value=current_data.get("LMS_MAX_FILE_SIZE_MB", "0") or "0")
+    ttk.Entry(size_frame, textvariable=max_mb_var, width=8, font=("Segoe UI", 9)).pack(side="right")
 
     btn_bar1 = tk.Frame(step1_frame, bg=bg_color, padx=24, pady=8)
     btn_bar1.pack(fill="x", side="bottom")
@@ -446,6 +454,11 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         courses_str = ",".join(selected_cids)
         keep_ann = "true" if keep_announcements_var.get() else "false"
         hermes_msg = "true" if hermes_var.get() else "false"
+        try:
+            max_mb = max(0.0, float(max_mb_var.get().strip() or 0))
+        except ValueError:
+            max_mb = 0.0
+        max_mb_str = f"{max_mb:g}"
         os.makedirs(lms_folder, exist_ok=True)
 
         env_content = f"""# Blackboard Sentinel Configuration
@@ -457,6 +470,7 @@ LMS_COURSES="{courses_str}"
 TRAY_THEME="{theme_choice}"
 LMS_KEEP_ALL_ANNOUNCEMENTS="{keep_ann}"
 LMS_HERMES_MESSAGING="{hermes_msg}"
+LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
 """
         # Save to AppData and local .env
         appdata_env = get_default_config_path()
@@ -482,6 +496,7 @@ LMS_HERMES_MESSAGING="{hermes_msg}"
         os.environ["TRAY_THEME"] = theme_choice
         os.environ["LMS_KEEP_ALL_ANNOUNCEMENTS"] = keep_ann
         os.environ["LMS_HERMES_MESSAGING"] = hermes_msg
+        os.environ["LMS_MAX_FILE_SIZE_MB"] = max_mb_str
 
         check_lms.init_config()
         saved_flag["saved"] = True

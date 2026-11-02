@@ -18,7 +18,7 @@ hermes_scripts = os.path.expanduser("~/.hermes/scripts")
 if os.path.exists(hermes_scripts) and hermes_scripts not in sys.path:
     sys.path.append(hermes_scripts)
 
-from check_lms import LMSClient, get_courses_map, AST_TZ, init_config, is_configured
+from check_lms import LMSClient, get_courses_map, AST_TZ, init_config, is_configured, submission_status
 import check_lms
 
 
@@ -50,8 +50,9 @@ def get_deadlines():
 
     # 2. Gradebook Columns
     courses_map = get_courses_map(client)
-    for cid in courses_map.keys():
-        cols = client.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns")
+    dl_cids = list(courses_map.keys())
+    dl_cols = check_lms._parallel_map(lambda c: client.get_json(f"/learn/api/public/v2/courses/{c}/gradebook/columns"), dl_cids)
+    for cid, cols in zip(dl_cids, dl_cols):
         if cols and "results" in cols:
             for c in cols["results"]:
                 due_str = c.get("grading", {}).get("due")
@@ -86,11 +87,9 @@ def get_deadlines():
                     grade_entry = v
                     break
 
-        if grade_entry:
-            g_status = grade_entry.get("status")
-            g_score = grade_entry.get("score")
-            if g_status in ("Graded", "NeedsGrading") or g_score is not None:
-                continue
+        sub_status = submission_status(grade_entry)
+        if sub_status == "GRADED":
+            continue
 
         try:
             due_dt = datetime.fromisoformat(it["due_str"].replace("Z", "+00:00"))
@@ -116,7 +115,8 @@ def get_deadlines():
             "title": it["title"],
             "due_dt": due_dt,
             "due_str": due_ast.strftime("%A, %b %d, %Y at %I:%M %p AST"),
-            "countdown": countdown
+            "countdown": countdown,
+            "submission": sub_status
         })
 
     upcoming.sort(key=lambda x: x["due_dt"])
@@ -160,6 +160,7 @@ def main():
                 f"   *Course*: {it['course']}\n"
                 f"   *Instructor*: {it['doctor']}\n"
                 f"   *Due*: {it['due_str']} ({it['countdown']})\n"
+                f"   *Status*: {it['submission']}\n"
             )
         out = "\n".join(lines).strip()
 

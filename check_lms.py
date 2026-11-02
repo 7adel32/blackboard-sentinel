@@ -18,6 +18,8 @@ import subprocess
 import urllib.request
 import urllib.parse
 import http.cookiejar
+import copy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 # Ensure UTF-8 output on Windows consoles to prevent cp1252 UnicodeEncodeError on Arabic strings
@@ -66,7 +68,7 @@ def init_config():
         if os.path.isfile(c):
             load_env_file(c)
 
-    global LMS_URL, USER_ID, PASSWORD, STUDENT_USER_ID, LMS_STORAGE_DIR, LMS_COURSES, TRAY_THEME, STATE_DIR, STATE_FILE, LOGS_DIR, KEEP_ALL_ANNOUNCEMENTS
+    global LMS_URL, USER_ID, PASSWORD, STUDENT_USER_ID, LMS_STORAGE_DIR, LMS_COURSES, TRAY_THEME, STATE_DIR, STATE_FILE, LOGS_DIR, KEEP_ALL_ANNOUNCEMENTS, MAX_FILE_BYTES, MAX_WORKERS
 
     LMS_URL = os.getenv("LMS_URL", "").rstrip("/")
     USER_ID = os.getenv("LMS_USER_ID", "")
@@ -76,6 +78,19 @@ def init_config():
     LMS_COURSES = os.getenv("LMS_COURSES", "")
     TRAY_THEME = os.getenv("TRAY_THEME", "auto")
     KEEP_ALL_ANNOUNCEMENTS = os.getenv("LMS_KEEP_ALL_ANNOUNCEMENTS", "false").lower() in ("true", "1", "yes")
+
+    # Size-based skip rule: files larger than this many MB are not downloaded. 0 (default) = disabled.
+    try:
+        MAX_FILE_BYTES = int(max(0.0, float(os.getenv("LMS_MAX_FILE_SIZE_MB", "0") or 0)) * 1024 * 1024)
+    except ValueError:
+        MAX_FILE_BYTES = 0
+
+    # Parallel course checking: number of worker threads.
+    # 0 (default) = unlimited (one worker per task, hard-capped at 16); 1 = sequential.
+    try:
+        MAX_WORKERS = max(0, int(os.getenv("LMS_MAX_WORKERS", "0") or 0))
+    except ValueError:
+        MAX_WORKERS = 0
 
     hermes_state = os.path.expanduser("~/.hermes/state")
     if os.path.exists(hermes_state) or os.path.exists(os.path.expanduser("~/.hermes")):
@@ -90,6 +105,17 @@ def init_config():
         LOGS_DIR = os.path.expanduser("~/.blackboard-sentinel/logs")
 
     STATE_FILE = os.path.join(STATE_DIR, "lms_tracker_state.json")
+
+
+def _parallel_map(fn, items):
+    """Run fn over items on up to MAX_WORKERS threads (0 = unlimited, capped at 16), preserving input order."""
+    items = list(items)
+    cap = 16 if MAX_WORKERS == 0 else MAX_WORKERS
+    workers = max(1, min(cap, len(items)))
+    if workers == 1:
+        return [fn(i) for i in items]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(fn, items))
 
 
 def is_configured():
@@ -411,12 +437,27 @@ def validate_blackboard_url(url, timeout=3.0):
     return clean
 
 
+class FileTooLargeError(Exception):
+    """Raised when a file exceeds the user-configured size cap (LMS_MAX_FILE_SIZE_MB)."""
+
+    def __init__(self, size_bytes):
+        super().__init__(f"{size_bytes} bytes exceeds the configured size limit")
+        self.size_bytes = size_bytes
+
+
 class LMSClient:
     def __init__(self, username, password):
         self.username = username
         self.password = password
         self.cj = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj))
+        self._columns_cache = {}
+
+    def get_columns(self, cid):
+        """Gradebook column list for a course, fetched at most once per client (shared by grades and deadlines)."""
+        if cid not in self._columns_cache:
+            self._columns_cache[cid] = self.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns")
+        return self._columns_cache[cid]
 
     def login(self, timeout=DEFAULT_TIMEOUT):
         validate_blackboard_url(LMS_URL, timeout=5)
@@ -475,21 +516,34 @@ class LMSClient:
         except Exception:
             return None
 
-    def download_file(self, path_or_url, dest_path):
+    def download_file(self, path_or_url, dest_path, max_bytes=0):
         url = path_or_url if path_or_url.startswith("http") else f"{LMS_URL}{path_or_url}"
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         tmp_dest = dest_path + ".part"
-        with self.opener.open(req) as resp, open(tmp_dest, "wb") as f:
+        with self.opener.open(req) as resp:
             cl = resp.headers.get("Content-Length")
             expected_bytes = int(cl) if cl and cl.isdigit() else None
+            if max_bytes and expected_bytes is not None and expected_bytes > max_bytes:
+                raise FileTooLargeError(expected_bytes)
             downloaded = 0
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
+            with open(tmp_dest, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if max_bytes and downloaded > max_bytes:
+                        break
+
+        if max_bytes and downloaded > max_bytes:
+            # Size was not advertised up front; abort once the cap is exceeded.
+            try:
+                os.remove(tmp_dest)
+            except Exception:
+                pass
+            raise FileTooLargeError(downloaded)
 
         if expected_bytes is not None and downloaded != expected_bytes:
             if os.path.exists(tmp_dest):
@@ -696,6 +750,7 @@ def check_and_download_course_files(client, cid, info, state):
     seen_files_mtime = state.setdefault("seen_files_mtime", {})
     seen_requests_set = set(state.get("seen_requests", []))
     seen_links_set = set(state.get("seen_links", []))
+    skipped_large = state.setdefault("skipped_large", {})
 
     cloud_link_re = re.compile(
         r'href=["\'](https?://(?:www\.)?(?:drive\.google\.com|docs\.google\.com|sharepoint\.com|1drv\.ms|onedrive\.live\.com|youtube\.com|youtu\.be|colab\.research\.google\.com|kaltura\.com|github\.com)[^\s"\'<>]+)["\']',
@@ -760,8 +815,13 @@ def check_and_download_course_files(client, cid, info, state):
                 seen_files_mtime[file_key] = item_modified
             return
 
+        # Size-based skip (disabled unless LMS_MAX_FILE_SIZE_MB > 0)
+        if MAX_FILE_BYTES and skipped_large.get(file_key, 0) > MAX_FILE_BYTES:
+            return
+
         try:
-            client.download_file(download_url, target_path)
+            client.download_file(download_url, target_path, max_bytes=MAX_FILE_BYTES)
+            skipped_large.pop(file_key, None)
             if bb_ts:
                 try:
                     os.utime(target_path, (bb_ts, bb_ts))
@@ -785,6 +845,9 @@ def check_and_download_course_files(client, cid, info, state):
                 "is_request": request_ctx is not None,
                 "is_update": is_revision
             })
+        except FileTooLargeError as big:
+            skipped_large[file_key] = big.size_bytes
+            sys.stderr.write(f"Skipped {fname_clean}: {big.size_bytes / 1048576:.1f} MB exceeds limit of {MAX_FILE_BYTES / 1048576:.1f} MB\n")
         except Exception as dl_err:
             sys.stderr.write(f"Download error for {fname_clean}: {dl_err}\n")
 
@@ -954,6 +1017,17 @@ def check_and_download_course_files(client, cid, info, state):
     return downloads, new_requests, external_links
 
 
+def submission_status(grade_entry):
+    """Classify a gradebook entry as GRADED, SUBMITTED, NOT SUBMITTED, or UNVERIFIED (no gradebook record)."""
+    if not grade_entry:
+        return "UNVERIFIED"
+    if grade_entry.get("status") == "Graded" or grade_entry.get("score") is not None:
+        return "GRADED"
+    if grade_entry.get("status") == "NeedsGrading":
+        return "SUBMITTED"
+    return "NOT SUBMITTED"
+
+
 def check_deadlines(client, state, courses_map=None):
     deadline_alerts = []
     now = datetime.now(timezone.utc)
@@ -979,8 +1053,9 @@ def check_deadlines(client, state, courses_map=None):
 
     # Source 2: Course Gradebook Columns (ensures items not on calendar are captured)
     courses_dict = courses_map if courses_map is not None else get_courses_map(client)
-    for cid, cinfo in courses_dict.items():
-        cols = client.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns")
+    dl_cids = list(courses_dict.keys())
+    dl_cols = _parallel_map(client.get_columns, dl_cids)
+    for cid, cols in zip(dl_cids, dl_cols):
         if cols and "results" in cols:
             for c in cols["results"]:
                 grading = c.get("grading", {})
@@ -995,6 +1070,30 @@ def check_deadlines(client, state, courses_map=None):
                             "due_str": due_str
                         }
 
+    # Cache everything needed to evaluate reminders later without touching the network
+    state["deadline_cache"] = {
+        "items": [dict(v, key=k) for k, v in candidates.items()],
+        "courses": {
+            cid: {"name": c.get("name", ""), "code": c.get("code", ""), "doctor": c.get("doctor", "")}
+            for cid, c in courses_dict.items()
+        },
+    }
+
+    return _deadline_alerts(candidates, state, courses_dict, now)
+
+
+def check_cached_reminders(state):
+    """Fire T-72h / T-24h / T-3h style reminders from the local deadline cache. Makes no network calls."""
+    cache = state.get("deadline_cache") or {}
+    items = cache.get("items") or []
+    if not items:
+        return []
+    candidates = {i.get("key") or i.get("id"): i for i in items}
+    return _deadline_alerts(candidates, state, cache.get("courses", {}), datetime.now(timezone.utc))
+
+
+def _deadline_alerts(candidates, state, courses_dict, now):
+    deadline_alerts = []
     alerted_map = state.get("alerted_deadlines", {})
     seen_grades = state.get("seen_grades", {})
 
@@ -1029,7 +1128,6 @@ def check_deadlines(client, state, courses_map=None):
 
         item_alerts = alerted_map.get(item_id, [])
         cal_id = item_data["cid"]
-        courses_dict = courses_map if courses_map is not None else get_courses_map(client)
         course_info = courses_dict.get(cal_id, {"name": item_data.get("title", "Course"), "code": "", "doctor": ""})
 
         thresholds = [
@@ -1060,7 +1158,8 @@ def check_deadlines(client, state, courses_map=None):
                     "doctor": course_info.get("doctor", ""),
                     "task": item_data["title"],
                     "due": formatted_due,
-                    "remaining": remaining_str
+                    "remaining": remaining_str,
+                    "submission": submission_status(grade_entry)
                 })
                 break
 
@@ -1379,76 +1478,128 @@ def check_grades(client, state, courses_map=None, student_user_id=None):
     grade_alerts = []
     seen_grades = state.get("seen_grades", {})
     is_initialized = bool(seen_grades)
+    target_uid = student_user_id or getattr(client, "student_user_id", "") or STUDENT_USER_ID
 
     courses_dict = courses_map if courses_map is not None else get_courses_map(client)
-    for cid, info in courses_dict.items():
-        cols = client.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns")
+    course_items = list(courses_dict.items())
+
+    # Stage 1: fetch gradebook columns for all courses in parallel
+    col_lists = _parallel_map(lambda ci: client.get_columns(ci[0]), course_items)
+
+    tasks = []
+    for (cid, info), cols in zip(course_items, col_lists):
         if not cols or "results" not in cols:
             continue
-
         for col in cols["results"]:
-            col_id = col.get("id")
-            col_name = col.get("name") or "Grade Item"
-            grade_key = f"{cid}_{col_id}"
+            tasks.append((cid, info, col))
 
-            grade_data = target_uid = student_user_id or getattr(client, "student_user_id", "") or STUDENT_USER_ID
-            grade_data = client.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns/{col_id}/users/{target_uid}")
-            if not grade_data:
-                continue
+    # Stage 2: fetch the student's grade for every column in parallel
+    grade_results = _parallel_map(
+        lambda t: client.get_json(f"/learn/api/public/v2/courses/{t[0]}/gradebook/columns/{t[2].get('id')}/users/{target_uid}"),
+        tasks
+    )
 
-            status = grade_data.get("status")
-            dg = grade_data.get("displayGrade", {})
-            score = dg.get("score")
-            possible = dg.get("possible")
-            feedback_raw = grade_data.get("feedback", "")
-            feedback = clean_html(feedback_raw)
+    # Stage 3: compare against saved state sequentially (deterministic order, no shared-state races)
+    for (cid, info, col), grade_data in zip(tasks, grade_results):
+        col_id = col.get("id")
+        col_name = col.get("name") or "Grade Item"
+        grade_key = f"{cid}_{col_id}"
 
-            prev = seen_grades.get(grade_key)
+        if not grade_data:
+            continue
 
-            trigger_alert = False
-            if prev is not None:
-                prev_score = prev.get("score")
-                prev_status = prev.get("status")
-                prev_feedback = prev.get("feedback")
+        status = grade_data.get("status")
+        dg = grade_data.get("displayGrade", {})
+        score = dg.get("score")
+        possible = dg.get("possible")
+        feedback_raw = grade_data.get("feedback", "")
+        feedback = clean_html(feedback_raw)
 
-                score_posted = (prev_score is None and score is not None)
-                score_changed = (prev_score is not None and score is not None and prev_score != score)
-                feedback_added = (not prev_feedback and bool(feedback))
-                status_changed_to_graded = (prev_status != "Graded" and status == "Graded")
+        prev = seen_grades.get(grade_key)
 
-                if score_posted or score_changed or feedback_added or (status_changed_to_graded and score is not None):
-                    trigger_alert = True
-            elif is_initialized and (score is not None or status == "Graded"):
-                # Newly discovered column that already has a posted score/grade
+        trigger_alert = False
+        if prev is not None:
+            prev_score = prev.get("score")
+            prev_status = prev.get("status")
+            prev_feedback = prev.get("feedback")
+
+            score_posted = (prev_score is None and score is not None)
+            score_changed = (prev_score is not None and score is not None and prev_score != score)
+            feedback_added = (not prev_feedback and bool(feedback))
+            status_changed_to_graded = (prev_status != "Graded" and status == "Graded")
+
+            if score_posted or score_changed or feedback_added or (status_changed_to_graded and score is not None):
                 trigger_alert = True
+        elif is_initialized and (score is not None or status == "Graded"):
+            # Newly discovered column that already has a posted score/grade
+            trigger_alert = True
 
-            if trigger_alert:
-                pct_str = ""
-                if score is not None and possible and possible > 0:
-                    pct = (score / possible) * 100.0
-                    pct_str = f" ({pct:.1f}%)"
+        if trigger_alert:
+            pct_str = ""
+            if score is not None and possible and possible > 0:
+                pct = (score / possible) * 100.0
+                pct_str = f" ({pct:.1f}%)"
 
-                score_str = f"{score} / {possible}{pct_str}" if (score is not None and possible) else (f"{score}" if score is not None else "Graded")
-                grade_alerts.append({
-                    "course": f"{info['name']} ({info['code']})",
-                    "doctor": info["doctor"],
-                    "task": col_name,
-                    "score_str": score_str,
-                    "status": status or "Graded",
-                    "feedback": feedback
-                })
-
-            seen_grades[grade_key] = {
+            score_str = f"{score} / {possible}{pct_str}" if (score is not None and possible) else (f"{score}" if score is not None else "Graded")
+            grade_alerts.append({
                 "course": f"{info['name']} ({info['code']})",
-                "name": col_name,
-                "score": score,
-                "possible": possible,
-                "status": status,
+                "doctor": info["doctor"],
+                "task": col_name,
+                "score_str": score_str,
+                "status": status or "Graded",
                 "feedback": feedback
-            }
+            })
+
+        seen_grades[grade_key] = {
+            "course": f"{info['name']} ({info['code']})",
+            "name": col_name,
+            "score": score,
+            "possible": possible,
+            "status": status,
+            "feedback": feedback
+        }
 
     state["seen_grades"] = seen_grades
     return grade_alerts
+
+
+_COURSE_LIST_KEYS = ("seen_files", "seen_requests", "seen_links", "seen_announcements")
+_COURSE_DICT_KEYS = ("seen_files_mtime", "skipped_large")
+
+
+def _sync_course(client, cid, info, state):
+    """Sync one course against a private copy of the state so courses can run concurrently."""
+    local = {}
+    for k in _COURSE_LIST_KEYS:
+        local[k] = list(state.get(k, []))
+    for k in _COURSE_DICT_KEYS:
+        local[k] = dict(state.get(k, {}))
+
+    new_reqs_local = []
+    dl, new_reqs, ext_links = check_and_download_course_files(client, cid, info, local)
+    new_reqs_local.extend(new_reqs)
+    ann = check_announcements(client, cid, info, local, new_requests=new_reqs_local)
+    return {"downloads": dl, "requests": new_reqs_local, "links": ext_links, "announcements": ann, "state": local}
+
+
+def _merge_course_state(state, local):
+    for k in _COURSE_LIST_KEYS:
+        existing = state.setdefault(k, [])
+        known = set(existing)
+        for v in local.get(k, []):
+            if v not in known:
+                existing.append(v)
+                known.add(v)
+    for k in _COURSE_DICT_KEYS:
+        state.setdefault(k, {}).update(local.get(k, {}))
+
+
+def sync_all_courses(client, state, courses_dict):
+    """Sync every course (parallel per LMS_MAX_WORKERS) and merge results into state.
+    Returns (downloads, new_requests, announcements, external_links)."""
+    all_downloads, all_new_requests, all_announcements, all_external_links = [], [], [], []
+    all_downloads, all_new_requests, all_announcements, all_external_links = sync_all_courses(client, state, courses_dict)
+    return all_downloads, all_new_requests, all_announcements, all_external_links
 
 
 def main():
@@ -1473,13 +1624,14 @@ def main():
     all_external_links = []
 
     courses_dict = get_courses_map(client)
-    for cid, info in courses_dict.items():
-        dl, new_reqs, ext_links = check_and_download_course_files(client, cid, info, state)
-        all_downloads.extend(dl)
-        all_new_requests.extend(new_reqs)
-        all_external_links.extend(ext_links)
-        ann = check_announcements(client, cid, info, state, new_requests=all_new_requests)
-        all_announcements.extend(ann)
+    course_items = list(courses_dict.items())
+    course_results = _parallel_map(lambda ci: _sync_course(client, ci[0], ci[1], state), course_items)
+    for res in course_results:
+        _merge_course_state(state, res["state"])
+        all_downloads.extend(res["downloads"])
+        all_new_requests.extend(res["requests"])
+        all_external_links.extend(res["links"])
+        all_announcements.extend(res["announcements"])
 
     all_grades = check_grades(client, state, courses_map=courses_dict)
     all_deadlines = check_deadlines(client, state, courses_map=courses_dict)
@@ -1577,7 +1729,8 @@ def format_update_messages(all_downloads, all_new_requests, all_announcements, a
             msg_parts.append(
                 f"• *Course*: {dl['course']}{doc_str}\n"
                 f"  *Task*: **{dl['task']}**\n"
-                f"  *Due*: {dl['due']} ({dl['remaining']})"
+                f"  *Due*: {dl['due']} ({dl['remaining']})\n"
+                f"  *Status*: **{dl.get('submission', 'UNVERIFIED')}**"
             )
         messages.append("\n\n".join(msg_parts))
 

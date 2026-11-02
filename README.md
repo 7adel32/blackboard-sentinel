@@ -14,6 +14,8 @@ Monitors university courses in the background, automatically organizes downloade
   - Inspects assignment instructions and tests (`data-bbfile` JSON payloads) to extract homework files and project briefs that naive scrapers miss.
 - **Authoritative Deadline Tracking**: Merges Blackboard calendar items with the gradebook's authoritative `grading.due` column, clamping requests to avoid API date-window drops.
 - **Grade & Feedback Sentinel**: Tracks grade releases, score updates, status transitions (`NeedsGrading` -> `Graded`), and instructor feedback comments.
+- **Parallel Course Checking**: Courses, gradebook columns, and grades are fetched on a small thread pool (`LMS_MAX_WORKERS`, default 0 = unlimited; set to 1 for sequential on very old single-core machines).
+- **Optional Size Cap**: Set `LMS_MAX_FILE_SIZE_MB` (or use the Settings window) to skip files above a given size. Disabled by default (`0`); skipped files are retried automatically if you raise the limit.
 - **Minimal Resource Footprint**:
   - **Windows Tray App**: Sits idle in the notification area at only ~25–35 MB RAM.
   - **Hermes Agent & Linux**: **0 MB** idle RAM (runs on-demand via `hermes cron`, taking ~18 MB for 3–5 seconds during checks and terminating immediately).

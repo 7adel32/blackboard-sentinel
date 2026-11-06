@@ -121,8 +121,11 @@ def main():
             status = g["status"]
 
             if score is not None and pos:
-                pct = (score / pos) * 100.0
-                grade_str = f"**{score} / {pos}** ({pct:.1f}%)"
+                try:
+                    pct = (float(score) / float(pos)) * 100.0
+                    grade_str = f"**{score} / {pos}** ({pct:.1f}%)"
+                except (ValueError, TypeError, ZeroDivisionError):
+                    grade_str = f"**{score} / {pos}**"
             elif score is not None:
                 grade_str = f"**{score}**"
             elif status == "NeedsGrading":

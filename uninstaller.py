@@ -98,6 +98,28 @@ def wipe_appdata_and_state():
             except Exception:
                 pass
 
+    # Remove credentials from system keyring
+    try:
+        import keyring
+        appdata_env = os.path.join(appdata, "BlackboardSentinel", ".env") if appdata else ""
+        user_id = ""
+        for p in [appdata_env, os.path.join(os.getcwd(), ".env")]:
+            if p and os.path.isfile(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("LMS_USER_ID="):
+                            user_id = line.split("=", 1)[1].strip().strip("'\"")
+                            break
+            if user_id:
+                break
+        if user_id:
+            try:
+                keyring.delete_password("BlackboardSentinel", user_id)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     hermes_state = os.path.expanduser("~/.hermes/state/lms_tracker_state.json")
     if os.path.exists(hermes_state):
         try:

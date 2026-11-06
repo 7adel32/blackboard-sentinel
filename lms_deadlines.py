@@ -53,14 +53,14 @@ def get_deadlines():
     dl_cids = list(courses_map.keys())
     dl_cols = check_lms._parallel_map(lambda c: client.get_json(f"/learn/api/public/v2/courses/{c}/gradebook/columns"), dl_cids)
     for cid, cols in zip(dl_cids, dl_cols):
-        if cols and "results" in cols:
-            for c in cols["results"]:
+        if cols and isinstance(cols, dict) and "results" in cols:
+            for c in cols.get("results") or []:
                 due_str = c.get("grading", {}).get("due")
                 col_id = c.get("id")
-                if due_str and col_id not in candidates:
+                if due_str and col_id and col_id not in candidates:
                     candidates[col_id] = {
                         "cid": cid,
-                        "title": c.get("name"),
+                        "title": c.get("name") or "Untitled Assignment",
                         "due_str": due_str
                     }
 

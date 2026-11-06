@@ -35,6 +35,48 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
+KEYRING_SERVICE = "BlackboardSentinel"
+
+
+def get_keyring_password(username):
+    """Retrieve password securely from system keyring/credential store."""
+    if not username:
+        return ""
+    try:
+        import keyring
+        pwd = keyring.get_password(KEYRING_SERVICE, username)
+        return pwd or ""
+    except Exception:
+        return ""
+
+
+def set_keyring_password(username, password):
+    """Store password securely in system keyring/credential store."""
+    if not username:
+        return False
+    try:
+        import keyring
+        keyring.set_password(KEYRING_SERVICE, username, password)
+        return True
+    except Exception:
+        return False
+
+
+def delete_keyring_password(username):
+    """Delete password from system keyring/credential store."""
+    if not username:
+        return False
+    try:
+        import keyring
+        try:
+            keyring.delete_password(KEYRING_SERVICE, username)
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
 def load_env_file(filepath):
     """Load key-value pairs from a .env file into os.environ if not already set."""
     if not os.path.isfile(filepath):
@@ -74,6 +116,14 @@ def init_config():
     LMS_URL = os.getenv("LMS_URL", "").rstrip("/")
     USER_ID = os.getenv("LMS_USER_ID", "")
     PASSWORD = os.getenv("LMS_PASSWORD", "")
+    if not PASSWORD and USER_ID:
+        PASSWORD = get_keyring_password(USER_ID)
+    elif PASSWORD and USER_ID:
+        try:
+            if not get_keyring_password(USER_ID):
+                set_keyring_password(USER_ID, PASSWORD)
+        except Exception:
+            pass
     STUDENT_USER_ID = os.getenv("LMS_STUDENT_ID", "")
     LMS_STORAGE_DIR = os.path.expanduser(os.getenv("LMS_STORAGE_DIR", "~/Documents/University"))
     LMS_COURSES = os.getenv("LMS_COURSES", "")

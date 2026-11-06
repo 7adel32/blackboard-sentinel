@@ -55,6 +55,10 @@ def load_existing_config():
                 break
             except Exception:
                 pass
+    if not data.get("LMS_PASSWORD") and data.get("LMS_USER_ID"):
+        keyring_pwd = check_lms.get_keyring_password(data["LMS_USER_ID"])
+        if keyring_pwd:
+            data["LMS_PASSWORD"] = keyring_pwd
     return data
 
 
@@ -505,10 +509,14 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         max_mb_str = f"{max_mb:g}"
         os.makedirs(lms_folder, exist_ok=True)
 
+        # Store password securely in system keyring
+        if lms_user and lms_pass:
+            check_lms.set_keyring_password(lms_user, lms_pass)
+
+        # Do not persist LMS_PASSWORD in plain text in .env
         env_content = f"""# Blackboard Sentinel Configuration
 LMS_URL="{lms_url}"
 LMS_USER_ID="{lms_user}"
-LMS_PASSWORD="{lms_pass}"
 LMS_STORAGE_DIR="{lms_folder}"
 LMS_COURSES="{courses_str}"
 TRAY_THEME="{theme_choice}"

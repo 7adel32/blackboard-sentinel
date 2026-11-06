@@ -1,0 +1,93 @@
+name: Build & Release Windows Executables
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional release tag (e.g., v1.1.3) to publish a GitHub Release'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pywin32
+
+      - name: Build bundled executables (PyInstaller)
+        run: |
+          pyinstaller --noconfirm BlackboardSentinel.spec
+          pyinstaller --noconfirm BlackboardSentinelCLI.spec
+          pyinstaller --noconfirm uninstall.spec
+          pyinstaller --noconfirm installer.spec
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlackboardSentinel-Windows
+          path: |
+            dist/BlackboardSentinelSetup.exe
+            dist/BlackboardSentinel.exe
+            dist/BlackboardSentinelCLI.exe
+            dist/uninstall.exe
+
+      - name: Determine Release Tag
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ inputs.tag }}" -ne "") {
+            $tag = "${{ inputs.tag }}"
+          } elseif ("${{ github.ref }}" -like "refs/tags/v*") {
+            $tag = "${{ github.ref_name }}"
+          } else {
+            git fetch --tags --force
+            $headTags = @(git tag --points-at HEAD | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' })
+            if ($headTags.Count -gt 0) {
+              $tag = $headTags[0]
+            } else {
+              $allTags = @(git tag -l "v*.*.*" | Where-Object { $_ -match '^v(\d+)\.(\d+)\.(\d+)$' })
+              if ($allTags.Count -eq 0) {
+                $tag = "v1.1.3"
+              } else {
+                $sorted = $allTags | Sort-Object { [version]($_.TrimStart('v')) } -Descending
+                $latest = [version]($sorted[0].TrimStart('v'))
+                $nextPatch = $latest.Build + 1
+                $tag = "v$($latest.Major).$($latest.Minor).$nextPatch"
+              }
+            }
+          }
+          Write-Host "Resolved release tag: $tag"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/BlackboardSentinelSetup.exe
+            dist/BlackboardSentinel.exe
+            dist/BlackboardSentinelCLI.exe

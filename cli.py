@@ -57,6 +57,8 @@ def cmd_status(args):
         "state_file": check_lms.STATE_FILE,
         "max_workers": check_lms.MAX_WORKERS,
         "max_file_size_mb": round(check_lms.MAX_FILE_BYTES / 1048576, 2),
+        "expand_zips": check_lms.EXPAND_ZIPS,
+        "delete_original_zip": check_lms.DELETE_ORIGINAL_ZIP,
         "cached_deadlines": len(cache),
         "tracked_files": len(state.get("seen_files", [])),
         "tracked_grades": len(state.get("seen_grades", {})),

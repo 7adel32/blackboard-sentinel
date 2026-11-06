@@ -38,3 +38,5 @@ Execute the dedicated Python script immediately via the terminal tool and reply 
 
 - `LMS_MAX_WORKERS`: parallel course checking threads. `0` (default) = unlimited (capped at 16 internally), `1` = sequential for very old single-core machines.
 - `LMS_MAX_FILE_SIZE_MB`: skip downloading files larger than this size. `0` (default) = disabled.
+- `LMS_EXPAND_ZIPS`: automatically decompress imported `.zip` files into `<name>_zip` in the same folder (`false` by default; compute intensive and not suitable for low-power machines).
+- `LMS_DELETE_ORIGINAL_ZIP`: delete the original `.zip` file after decompression (`false` by default).

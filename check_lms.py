@@ -19,6 +19,7 @@ import urllib.request
 import urllib.parse
 import http.cookiejar
 import copy
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
@@ -68,7 +69,7 @@ def init_config():
         if os.path.isfile(c):
             load_env_file(c)
 
-    global LMS_URL, USER_ID, PASSWORD, STUDENT_USER_ID, LMS_STORAGE_DIR, LMS_COURSES, TRAY_THEME, STATE_DIR, STATE_FILE, LOGS_DIR, KEEP_ALL_ANNOUNCEMENTS, MAX_FILE_BYTES, MAX_WORKERS
+    global LMS_URL, USER_ID, PASSWORD, STUDENT_USER_ID, LMS_STORAGE_DIR, LMS_COURSES, TRAY_THEME, STATE_DIR, STATE_FILE, LOGS_DIR, KEEP_ALL_ANNOUNCEMENTS, EXPAND_ZIPS, DELETE_ORIGINAL_ZIP, MAX_FILE_BYTES, MAX_WORKERS
 
     LMS_URL = os.getenv("LMS_URL", "").rstrip("/")
     USER_ID = os.getenv("LMS_USER_ID", "")
@@ -78,6 +79,8 @@ def init_config():
     LMS_COURSES = os.getenv("LMS_COURSES", "")
     TRAY_THEME = os.getenv("TRAY_THEME", "auto")
     KEEP_ALL_ANNOUNCEMENTS = os.getenv("LMS_KEEP_ALL_ANNOUNCEMENTS", "false").lower() in ("true", "1", "yes")
+    EXPAND_ZIPS = os.getenv("LMS_EXPAND_ZIPS", "false").lower() in ("true", "1", "yes")
+    DELETE_ORIGINAL_ZIP = os.getenv("LMS_DELETE_ORIGINAL_ZIP", "false").lower() in ("true", "1", "yes")
 
     # Size-based skip rule: files larger than this many MB are not downloaded. 0 (default) = disabled.
     try:
@@ -740,6 +743,50 @@ def find_target_subfolder(base_dir, context_hint):
     return base_dir
 
 
+def get_zip_extract_dir(zip_path):
+    """Return the target extraction folder '<stem>_zip' in the same directory as zip_path."""
+    parent = os.path.dirname(zip_path)
+    base = os.path.basename(zip_path)
+    stem, ext = os.path.splitext(base)
+    if ext.lower() == ".zip":
+        return os.path.join(parent, f"{stem}_zip")
+    return os.path.join(parent, f"{base}_zip")
+
+
+def expand_zip_archive(zip_path, bb_ts=None):
+    """
+    If EXPAND_ZIPS is enabled and zip_path is a .zip archive, extract it into
+    '<original_name>_zip' in the same directory and optionally delete the original .zip
+    when DELETE_ORIGINAL_ZIP is enabled. Returns the extracted folder path on success, or None.
+    """
+    if not EXPAND_ZIPS or not zip_path.lower().endswith(".zip") or not os.path.isfile(zip_path):
+        return None
+    extract_dir = get_zip_extract_dir(zip_path)
+    try:
+        os.makedirs(extract_dir, exist_ok=True)
+        real_root = os.path.realpath(extract_dir)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for member in zf.infolist():
+                member_dest = os.path.realpath(os.path.join(extract_dir, member.filename))
+                if member_dest != real_root and not member_dest.startswith(real_root + os.sep):
+                    continue
+                zf.extract(member, extract_dir)
+        if bb_ts:
+            try:
+                os.utime(extract_dir, (bb_ts, bb_ts))
+            except Exception:
+                pass
+        if DELETE_ORIGINAL_ZIP:
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
+        return extract_dir
+    except Exception as e:
+        sys.stderr.write(f"Error expanding zip archive {os.path.basename(zip_path)}: {e}\n")
+        return None
+
+
 def check_and_download_course_files(client, cid, info, state):
     downloads = []
     new_requests = []
@@ -785,6 +832,7 @@ def check_and_download_course_files(client, cid, info, state):
                         pass
 
         target_path = os.path.join(target_dir, fname_clean)
+        zip_extract_dir = get_zip_extract_dir(target_path) if fname_lower.endswith(".zip") else None
 
         # Revision Detection (Item 1)
         bb_ts = None
@@ -795,8 +843,9 @@ def check_and_download_course_files(client, cid, info, state):
                 pass
 
         is_revision = False
-        if os.path.exists(target_path):
-            local_ts = os.path.getmtime(target_path)
+        existing_check_path = target_path if os.path.exists(target_path) else (zip_extract_dir if (zip_extract_dir and os.path.isdir(zip_extract_dir)) else None)
+        if existing_check_path:
+            local_ts = os.path.getmtime(existing_check_path)
             prev_mtime = seen_files_mtime.get(file_key)
             if bb_ts and local_ts and (bb_ts > local_ts + 60 or (prev_mtime and item_modified != prev_mtime)):
                 is_revision = True
@@ -804,16 +853,10 @@ def check_and_download_course_files(client, cid, info, state):
                 seen_files_set.add(file_key)
                 if item_modified:
                     seen_files_mtime[file_key] = item_modified
-                if request_ctx is not None and fname_clean not in request_ctx["files"]:
-                    request_ctx["files"].append(fname_clean)
+                present_name = os.path.basename(existing_check_path)
+                if request_ctx is not None and present_name not in request_ctx["files"]:
+                    request_ctx["files"].append(present_name)
                 return
-        elif file_key in seen_files_set and os.path.exists(target_path):
-            if item_modified:
-                seen_files_mtime[file_key] = item_modified
-            return
-            if item_modified:
-                seen_files_mtime[file_key] = item_modified
-            return
 
         # Size-based skip (disabled unless LMS_MAX_FILE_SIZE_MB > 0)
         if MAX_FILE_BYTES and skipped_large.get(file_key, 0) > MAX_FILE_BYTES:
@@ -827,16 +870,20 @@ def check_and_download_course_files(client, cid, info, state):
                     os.utime(target_path, (bb_ts, bb_ts))
                 except Exception:
                     pass
+            extracted_dir = expand_zip_archive(target_path, bb_ts=bb_ts)
+            final_saved_path = extracted_dir if (extracted_dir and DELETE_ORIGINAL_ZIP) else target_path
             seen_files_set.add(file_key)
             if item_modified:
                 seen_files_mtime[file_key] = item_modified
             existing_files_lower.add(fname_lower)
-            if request_ctx is not None and fname_clean not in request_ctx["files"]:
-                request_ctx["files"].append(fname_clean)
+            if request_ctx is not None:
+                rec_name = os.path.basename(final_saved_path)
+                if rec_name not in request_ctx["files"]:
+                    request_ctx["files"].append(rec_name)
             try:
-                rel_saved = os.path.relpath(target_path, LMS_STORAGE_DIR)
+                rel_saved = os.path.relpath(final_saved_path, LMS_STORAGE_DIR)
             except ValueError:
-                rel_saved = target_path
+                rel_saved = final_saved_path
             downloads.append({
                 "course": f"{info['name']} ({info['code']})",
                 "doctor": info["doctor"],
@@ -1369,9 +1416,12 @@ def check_announcements(client, cid, info, state, new_requests=None):
             for af in attached_files:
                 target_fname = sanitize_filename(af["filename"] or "attachment")
                 target_path = os.path.join(ann_dir, target_fname)
-                if not os.path.exists(target_path):
+                zip_ext_dir = get_zip_extract_dir(target_path) if target_fname.lower().endswith(".zip") else None
+                already_present = os.path.exists(target_path) or (zip_ext_dir and os.path.isdir(zip_ext_dir))
+                if not already_present:
                     try:
                         client.download_file(af["url"], target_path)
+                        expand_zip_archive(target_path)
                     except Exception as e:
                         sys.stderr.write(f"Error downloading announcement attachment {target_fname}: {e}\n")
 
@@ -1415,8 +1465,16 @@ def check_announcements(client, cid, info, state, new_requests=None):
                             shutil.copy2(src_af, dst_af)
                         except Exception:
                             pass
-                    if af_fname not in req_files:
-                        req_files.append(af_fname)
+                    src_zip_dir = get_zip_extract_dir(src_af) if af_fname.lower().endswith(".zip") else None
+                    dst_zip_dir = get_zip_extract_dir(dst_af) if af_fname.lower().endswith(".zip") else None
+                    if src_zip_dir and os.path.isdir(src_zip_dir):
+                        try:
+                            shutil.copytree(src_zip_dir, dst_zip_dir, dirs_exist_ok=True)
+                        except Exception:
+                            pass
+                    rec_af_name = os.path.basename(dst_zip_dir) if (dst_zip_dir and os.path.isdir(dst_zip_dir) and not os.path.exists(dst_af)) else af_fname
+                    if rec_af_name not in req_files:
+                        req_files.append(rec_af_name)
 
                 doc_fname = f"{clean_title}.docx"
                 if doc_fname not in req_files and os.path.exists(os.path.join(req_dir, doc_fname)):

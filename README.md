@@ -200,6 +200,8 @@ Exit code is `0` on success and `1` on error, with a single `ERROR: ...` line on
 | `LMS_PASSWORD` | Student login password | *Required* |
 | `LMS_STORAGE_DIR` | Local root directory for downloaded course materials | `~/Documents/University` |
 | `LMS_STUDENT_ID` | Internal Blackboard user ID (auto-detected if omitted) | Auto-detected |
+| `LMS_EXPAND_ZIPS` | Decompress newly imported `.zip` files into `<name>_zip` in the same folder (compute intensive — not suitable for low-power machines) | `false` |
+| `LMS_DELETE_ORIGINAL_ZIP` | Delete the original `.zip` archive after decompression (when `LMS_EXPAND_ZIPS` is enabled) | `false` |
 | `HERMES_CHAT_PLATFORM` | Messaging platform for notifications via Hermes (`whatsapp`, `telegram`) | `whatsapp` |
 
 ---

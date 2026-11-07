@@ -1,4 +1,4 @@
-name: Build & Release Windows Executables
+name: Build & Release Executables (Windows & macOS)
 
 on:
   push:
@@ -43,7 +43,7 @@ jobs:
           pyinstaller --noconfirm uninstall.spec
           pyinstaller --noconfirm installer.spec
 
-      - name: Upload build artifacts
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: BlackboardSentinel-Windows
@@ -53,33 +53,88 @@ jobs:
             dist/BlackboardSentinelCLI.exe
             dist/uninstall.exe
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build macOS App and DMG
+        run: |
+          chmod +x build_dmg.sh
+          ./build_dmg.sh
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlackboardSentinel-macOS
+          path: |
+            dist/BlackboardSentinel.dmg
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: BlackboardSentinel-Windows
+          path: dist-windows
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: BlackboardSentinel-macOS
+          path: dist-macos
+
       - name: Determine Release Tag
         id: version
-        shell: pwsh
+        shell: bash
         run: |
-          if ("${{ inputs.tag }}" -ne "") {
-            $tag = "${{ inputs.tag }}"
-          } elseif ("${{ github.ref }}" -like "refs/tags/v*") {
-            $tag = "${{ github.ref_name }}"
-          } else {
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "${{ github.ref }}" =~ ^refs/tags/v.* ]]; then
+            TAG="${{ github.ref_name }}"
+          else
             git fetch --tags --force
-            $headTags = @(git tag --points-at HEAD | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' })
-            if ($headTags.Count -gt 0) {
-              $tag = $headTags[0]
-            } else {
-              $allTags = @(git tag -l "v*.*.*" | Where-Object { $_ -match '^v(\d+)\.(\d+)\.(\d+)$' })
-              if ($allTags.Count -eq 0) {
-                $tag = "v1.1.3"
-              } else {
-                $sorted = $allTags | Sort-Object { [version]($_.TrimStart('v')) } -Descending
-                $latest = [version]($sorted[0].TrimStart('v'))
-                $nextPatch = $latest.Build + 1
-                $tag = "v$($latest.Major).$($latest.Minor).$nextPatch"
-              }
-            }
-          }
-          Write-Host "Resolved release tag: $tag"
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            HEAD_TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+            if [ -n "$HEAD_TAG" ]; then
+              TAG="$HEAD_TAG"
+            else
+              LATEST_TAG=$(git tag -l "v*.*.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+              if [ -z "$LATEST_TAG" ]; then
+                TAG="v1.1.4"
+              else
+                # Increment patch version
+                V_NUM="${LATEST_TAG#v}"
+                MAJOR=$(echo "$V_NUM" | cut -d. -f1)
+                MINOR=$(echo "$V_NUM" | cut -d. -f2)
+                PATCH=$(echo "$V_NUM" | cut -d. -f3)
+                PATCH=$((PATCH + 1))
+                TAG="v${MAJOR}.${MINOR}.${PATCH}"
+              fi
+            fi
+          fi
+          echo "Resolved release tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -88,6 +143,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
-            dist/BlackboardSentinelSetup.exe
-            dist/BlackboardSentinel.exe
-            dist/BlackboardSentinelCLI.exe
+            dist-windows/BlackboardSentinelSetup.exe
+            dist-windows/BlackboardSentinel.exe
+            dist-windows/BlackboardSentinelCLI.exe
+            dist-macos/BlackboardSentinel.dmg

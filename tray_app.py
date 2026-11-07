@@ -162,7 +162,10 @@ class SentinelTrayApp:
                     try:
                         self.icon.notify(summary_text, "Blackboard Sentinel")
                     except Exception:
-                        check_lms.send_windows_toast("Blackboard Sentinel", summary_text)
+                        if sys.platform == "win32":
+                            check_lms.send_windows_toast("Blackboard Sentinel", summary_text)
+                        elif sys.platform == "darwin":
+                            check_lms.send_macos_notification("Blackboard Sentinel", summary_text)
             else:
                 self.set_state(TrayIconTheme.STATE_SYNCED, "All courses up to date")
 
@@ -213,6 +216,8 @@ class SentinelTrayApp:
         os.makedirs(folder, exist_ok=True)
         if sys.platform == "win32":
             os.startfile(folder)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", folder], check=False)
         else:
             subprocess.run(["xdg-open", folder], check=False)
 
@@ -329,13 +334,33 @@ class SentinelTrayApp:
         self.icon.run()
 
 
+def hide_dock_icon_macos():
+    """On macOS, set activation policy to accessory so the app runs purely in the menu bar without a Dock icon."""
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSApp, NSApplicationActivationPolicyAccessory
+            NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        except Exception:
+            pass
+
+
 def close_other_instances():
     """Close any older background instances so only the current updated instance runs."""
+    my_pid = os.getpid()
     if sys.platform == "win32":
         try:
-            my_pid = os.getpid()
             ps_cmd = f"Get-Process -Name 'BlackboardSentinel' -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {my_pid} }} | Stop-Process -Force -ErrorAction SilentlyContinue"
             subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except Exception:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            # Kill any other BlackboardSentinel or tray_app instances
+            ps_out = subprocess.run(["pgrep", "-f", "tray_app.py"], capture_output=True, text=True, check=False).stdout.splitlines()
+            for pid_str in ps_out:
+                p = int(pid_str.strip())
+                if p != my_pid:
+                    os.kill(p, 9)
         except Exception:
             pass
 
@@ -352,6 +377,7 @@ def main():
         check_lms.init_config()
 
     close_other_instances()
+    hide_dock_icon_macos()
     app = SentinelTrayApp()
     app.run()
 

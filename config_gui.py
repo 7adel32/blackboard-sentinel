@@ -14,8 +14,13 @@ import check_lms
 
 
 def get_default_config_path():
-    appdata = os.getenv("APPDATA", os.path.expanduser("~"))
-    config_dir = os.path.join(appdata, "BlackboardSentinel")
+    if sys.platform == "darwin":
+        config_dir = os.path.expanduser("~/Library/Application Support/BlackboardSentinel")
+    elif sys.platform == "win32":
+        appdata = os.getenv("APPDATA", os.path.expanduser("~"))
+        config_dir = os.path.join(appdata, "BlackboardSentinel")
+    else:
+        config_dir = os.path.expanduser("~/.blackboard-sentinel")
     os.makedirs(config_dir, exist_ok=True)
     return os.path.join(config_dir, ".env")
 
@@ -71,9 +76,17 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     # Use high-contrast app icon for title bar
     base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     ico_path = os.path.join(base_dir, "assets", "icon_app.ico")
-    if os.path.exists(ico_path):
+    png_path = os.path.join(base_dir, "assets", "icon_app.png")
+    if sys.platform == "win32" and os.path.exists(ico_path):
         try:
             root.iconbitmap(ico_path)
+        except Exception:
+            pass
+    elif os.path.exists(png_path):
+        try:
+            img = tk.PhotoImage(file=png_path)
+            root.iconphoto(True, img)
+            root._icon_photo_ref = img
         except Exception:
             pass
 
@@ -603,9 +616,17 @@ def show_info_window(title, content):
 
     base_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     ico_path = os.path.join(base_dir, "assets", "icon_app.ico")
-    if os.path.exists(ico_path):
+    png_path = os.path.join(base_dir, "assets", "icon_app.png")
+    if sys.platform == "win32" and os.path.exists(ico_path):
         try:
             root.iconbitmap(ico_path)
+        except Exception:
+            pass
+    elif os.path.exists(png_path):
+        try:
+            img = tk.PhotoImage(file=png_path)
+            root.iconphoto(True, img)
+            root._icon_photo_ref = img
         except Exception:
             pass
 

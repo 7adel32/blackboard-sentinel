@@ -106,6 +106,8 @@ def init_config():
     if sys.platform == "win32":
         appdata = os.getenv("APPDATA", os.path.expanduser("~"))
         candidates.append(os.path.join(appdata, "BlackboardSentinel", ".env"))
+    elif sys.platform == "darwin":
+        candidates.append(os.path.expanduser("~/Library/Application Support/BlackboardSentinel/.env"))
 
     for c in candidates:
         if os.path.isfile(c):
@@ -153,6 +155,10 @@ def init_config():
         local_appdata = os.getenv("LOCALAPPDATA", os.path.expanduser("~"))
         STATE_DIR = os.path.join(local_appdata, "BlackboardSentinel", "state")
         LOGS_DIR = os.path.join(local_appdata, "BlackboardSentinel", "logs")
+    elif sys.platform == "darwin":
+        base_support = os.path.expanduser("~/Library/Application Support/BlackboardSentinel")
+        STATE_DIR = os.path.join(base_support, "state")
+        LOGS_DIR = os.path.expanduser("~/Library/Logs/BlackboardSentinel")
     else:
         STATE_DIR = os.path.expanduser("~/.blackboard-sentinel/state")
         LOGS_DIR = os.path.expanduser("~/.blackboard-sentinel/logs")
@@ -321,6 +327,24 @@ def send_windows_toast(title, message):
         pass
 
 
+def send_macos_notification(title, message):
+    if sys.platform != "darwin":
+        return
+    lines = [l.strip() for l in message.strip().split("\n") if l.strip()]
+    safe_msg = (" - ".join(lines[:2]) if lines else "Updates detected")
+    if len(safe_msg) > 160:
+        safe_msg = safe_msg[:157] + "..."
+    script = """
+    on run argv
+        display notification (item 2 of argv) with title (item 1 of argv) sound name "default"
+    end run
+    """
+    try:
+        subprocess.run(["osascript", "-e", script, title, safe_msg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        pass
+
+
 def send_notification(text, title="Blackboard Sentinel"):
     if not text:
         return
@@ -330,6 +354,9 @@ def send_notification(text, title="Blackboard Sentinel"):
     # 2. Windows Native Toast alert
     if sys.platform == "win32":
         send_windows_toast(title, text)
+    # 3. macOS Native Notification Center alert
+    elif sys.platform == "darwin":
+        send_macos_notification(title, text)
 
 
 def load_state():

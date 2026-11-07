@@ -1,6 +1,9 @@
 # Core Blackboard Sentinel operates on Python 3.10+ standard library.
-# The dependencies below are required for Windows System Tray mode:
+# Cross-platform dependencies for System Tray / Menu Bar mode:
 pillow>=10.0.0
 pystray>=0.19.0
 python-docx>=1.1.0
 keyring>=25.0.0
+pyobjc-core>=10.0; sys_platform == 'darwin'
+pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'
+

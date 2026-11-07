@@ -24,18 +24,38 @@ LIGHT_NOT_CONFIGURED = (217, 119, 6)     # #D97706 Deep Amber
 LIGHT_ERROR_RED = (220, 38, 38)          # #DC2626 Deep Red
 
 
+def is_system_taskbar_light():
+    """Detect if the system taskbar/menu bar is configured in Light Theme."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            val, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
+            winreg.CloseKey(key)
+            return val == 1
+        except Exception:
+            return False
+    elif sys.platform == "darwin":
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+            # If "Dark" in output, macOS is in Dark mode; otherwise Light mode
+            is_dark = "dark" in res.stdout.strip().lower()
+            return not is_dark
+        except Exception:
+            return True
+    return False
+
+
 def is_windows_taskbar_light():
-    """Detect if Windows taskbar is configured in Light Theme."""
-    if sys.platform != "win32":
-        return False
-    try:
-        import winreg
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-        val, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
-        winreg.CloseKey(key)
-        return val == 1
-    except Exception:
-        return False
+    """Backward-compatible alias for Windows light theme detection."""
+    return is_system_taskbar_light()
 
 
 class TrayIconTheme:
@@ -74,7 +94,7 @@ class TrayIconTheme:
             return True
         elif pref == "dark":
             return False
-        return is_windows_taskbar_light()
+        return is_system_taskbar_light()
 
     def tint_base(self, rgb_color, alpha_factor=1.0):
         """Tint base image to specific RGB color with optional alpha factor."""

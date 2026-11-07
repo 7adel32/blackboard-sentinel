@@ -122,7 +122,30 @@ To uninstall:
 
 ---
 
-### 2. Standalone Manual CLI (Cross-Platform)
+### 2. macOS Menu Bar Application ("Tray" Port)
+
+Blackboard Sentinel runs natively in the **macOS Menu Bar** as a lightweight accessory item (`LSUIElement`) with Dark/Light appearance detection, dynamic state tinting, native macOS notifications (`osascript`), and auto-launch support.
+
+#### Quick Setup on macOS:
+```bash
+git clone https://github.com/7adel32/blackboard-sentinel.git
+cd blackboard-sentinel
+chmod +x install_mac.sh uninstall_mac.sh
+./install_mac.sh
+```
+
+The script configures a dedicated virtualenv, installs required macOS framework bindings (`pyobjc`), sets up a user `LaunchAgent` (`~/Library/LaunchAgents/com.sentinel.blackboard.plist`), and launches the application.
+
+#### Packaging into a standalone `.app` bundle:
+```bash
+pip install pyinstaller
+pyinstaller BlackboardSentinel_mac.spec
+```
+This produces `dist/BlackboardSentinel.app` ready to drop into `/Applications`.
+
+---
+
+### 3. Standalone Manual CLI (Cross-Platform)
 
 For headless servers, Linux, or command-line usage without the desktop tray:
 

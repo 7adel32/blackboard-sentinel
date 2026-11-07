@@ -140,7 +140,37 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     tk.Label(form1, text="Password", font=("Segoe UI", 9, "bold"), bg=card_bg, fg="#334155").pack(anchor="w")
     pass_var = tk.StringVar(value=current_data.get("LMS_PASSWORD", ""))
     pass_entry = ttk.Entry(form1, textvariable=pass_var, show="•", font=("Segoe UI", 9))
-    pass_entry.pack(fill="x", pady=(3, 10))
+    pass_entry.pack(fill="x", pady=(3, 6))
+
+    # Web portal login option (for MFA / SSO portals)
+    portal_opt_frame = tk.Frame(form1, bg=card_bg)
+    portal_opt_frame.pack(fill="x", pady=(0, 10))
+
+    btn_web_login = tk.Button(
+        portal_opt_frame,
+        text="Sign In Through Web Portal (SSO / MFA)",
+        font=("Segoe UI", 9),
+        bg="#F1F5F9",
+        fg="#1E293B",
+        activebackground="#E2E8F0",
+        relief="solid",
+        bd=1,
+        padx=10,
+        pady=4,
+        cursor="hand2"
+    )
+    btn_web_login.pack(anchor="w")
+
+    disclaimer_lbl = tk.Label(
+        portal_opt_frame,
+        text="Disclaimer: Web portal sign-in uses browser session cookies and may require periodic re-authentication when the university SSO session expires.",
+        font=("Segoe UI", 8),
+        bg=card_bg,
+        fg="#D97706",
+        wraplength=480,
+        justify="left"
+    )
+    disclaimer_lbl.pack(anchor="w", pady=(3, 0))
 
     # 4. Storage Folder
     tk.Label(form1, text="Course Files Storage Folder", font=("Segoe UI", 9, "bold"), bg=card_bg, fg="#334155").pack(anchor="w")
@@ -432,6 +462,67 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         status_lbl1.config(text="")
         messagebox.showerror("Connection Error", f"Failed to connect to Blackboard:\n{err_msg}", parent=root)
 
+    def _on_web_login_click():
+        raw_url = url_var.get().strip().rstrip("/")
+        if not raw_url:
+            messagebox.showerror(
+                "Missing LMS URL",
+                "Please enter your university LMS Base URL first (e.g. lms.university.edu).",
+                parent=root
+            )
+            return
+
+        if not check_lms.URL_REGEX.match(raw_url):
+            messagebox.showerror(
+                "Invalid Address",
+                f"'{raw_url}' is not a valid web address.\n\nPlease enter your university LMS domain (e.g. lms.university.edu or https://lms.university.edu).",
+                parent=root
+            )
+            return
+
+        clean_url = raw_url if raw_url.startswith(("http://", "https://")) else f"https://{raw_url}"
+        url_var.set(clean_url)
+
+        status_lbl1.config(text="Launching web portal in browser...", fg="#2563EB")
+        btn_next.config(state="disabled")
+        btn_choose.config(state="disabled")
+        btn_web_login.config(state="disabled")
+        root.update()
+
+        def _web_worker():
+            try:
+                check_lms.validate_blackboard_url(clean_url, timeout=3.0)
+                check_lms.LMS_URL = clean_url
+
+                def _status_cb(msg):
+                    root.after(0, lambda: status_lbl1.config(text=msg))
+
+                client, me = check_lms.run_browser_login_flow(clean_url, on_status_update=_status_cb)
+                if me:
+                    if me.get("userName") and not user_var.get().strip():
+                        root.after(0, lambda: user_var.set(me["userName"]))
+                    if me.get("studentId") and not user_var.get().strip():
+                        root.after(0, lambda: user_var.set(me["studentId"]))
+
+                courses = check_lms.fetch_all_available_courses(client)
+                root.after(0, _on_web_login_success, courses)
+            except Exception as e:
+                err_msg = str(e)
+                root.after(0, _on_web_login_error, err_msg)
+
+        threading.Thread(target=_web_worker, daemon=True).start()
+
+    def _on_web_login_error(err_msg):
+        btn_next.config(state="normal", text=next_text)
+        btn_choose.config(state="normal")
+        btn_web_login.config(state="normal")
+        status_lbl1.config(text="")
+        messagebox.showerror("Web Portal Login", f"Web portal sign-in was not completed:\n{err_msg}", parent=root)
+
+    def _on_web_login_success(courses):
+        btn_web_login.config(state="normal")
+        _on_fetch_success(courses)
+
     def _on_fetch_success(courses):
         nonlocal discovered_courses
         discovered_courses = courses
@@ -482,6 +573,8 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         # Switch views
         step1_frame.pack_forget()
         step2_frame.pack(fill="both", expand=True)
+
+    btn_web_login.config(command=_on_web_login_click)
 
     def go_back_to_step1():
         step2_frame.pack_forget()
@@ -575,8 +668,11 @@ LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
 
     if is_settings:
         def apply_settings():
-            if not (url_var.get().strip() and user_var.get().strip() and pass_var.get().strip()):
-                messagebox.showerror("Missing Information", "Please enter LMS URL, Student ID, and Password.", parent=root)
+            if not url_var.get().strip():
+                messagebox.showerror("Missing Information", "Please enter LMS URL.", parent=root)
+                return
+            if not check_lms.has_valid_browser_session() and not (user_var.get().strip() and pass_var.get().strip()):
+                messagebox.showerror("Missing Information", "Please enter Student ID and Password, or use 'Sign In Through Web Portal'.", parent=root)
                 return
             save_final_config()
         btn_next.config(command=apply_settings)

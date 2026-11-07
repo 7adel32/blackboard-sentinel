@@ -177,8 +177,301 @@ def _parallel_map(fn, items):
         return list(ex.map(fn, items))
 
 
+def find_local_chromium_browser():
+    """Find installed Edge or Chrome executable on Windows/macOS/Linux."""
+    if sys.platform == "win32":
+        candidates = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        ]
+    else:
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser"
+        ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def run_browser_login_flow(portal_url, on_status_update=None, timeout_seconds=300):
+    """
+    Launch an embedded browser webview window allowing SSO/MFA authentication.
+    Monitors authenticated Blackboard session cookies and extracts them into LMSClient.
+    """
+    browser_bin = find_local_chromium_browser()
+    if not browser_bin:
+        raise RuntimeError("No supported Chromium browser (Edge/Chrome) was found for web portal sign-in.")
+
+    clean_url = portal_url if portal_url.startswith(("http://", "https://")) else f"https://{portal_url}"
+    login_target_url = f"{clean_url.rstrip('/')}/webapps/login/"
+
+    import tempfile
+    import base64
+    import struct
+    import subprocess
+    import socket
+
+    # Allocate free local port
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    debug_port = s.getsockname()[1]
+    s.close()
+
+    temp_profile = tempfile.mkdtemp(prefix="bb_sentinel_browser_")
+
+    cmd = [
+        browser_bin,
+        f"--app={login_target_url}",
+        f"--remote-debugging-port={debug_port}",
+        f"--user-data-dir={temp_profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=720,820"
+    ]
+
+    if on_status_update:
+        on_status_update("Opening web login portal...")
+
+    proc = subprocess.Popen(cmd)
+
+    # Helper: read JSON from CDP HTTP endpoint
+    def cdp_get_json(endpoint):
+        req = urllib.request.Request(f"http://127.0.0.1:{debug_port}{endpoint}", headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    start_time = time.time()
+    ws_sock = None
+    captured_cookies = []
+
+    try:
+        # Wait for CDP endpoint to be ready
+        target_ws_url = None
+        while time.time() - start_time < 15.0:
+            if proc.poll() is not None:
+                raise RuntimeError("Browser window was closed before sign-in completed.")
+            try:
+                pages = cdp_get_json("/json")
+                for p in pages:
+                    if p.get("type") == "page" and p.get("webSocketDebuggerUrl"):
+                        target_ws_url = p["webSocketDebuggerUrl"]
+                        break
+                if target_ws_url:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        if not target_ws_url:
+            raise RuntimeError("Failed to attach to browser login window.")
+
+        # Connect to CDP websocket using pure standard library
+        ws_path = "/" + target_ws_url.split("/", 3)[3]
+        ws_sock = socket.socket()
+        ws_sock.settimeout(3.0)
+        ws_sock.connect(("127.0.0.1", debug_port))
+
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        ws_req = (
+            f"GET {ws_path} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{debug_port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        ws_sock.sendall(ws_req.encode("ascii"))
+        hs_resp = b""
+        while b"\r\n\r\n" not in hs_resp:
+            chunk = ws_sock.recv(1024)
+            if not chunk:
+                break
+            hs_resp += chunk
+        if b"101 " not in hs_resp:
+            raise RuntimeError("Failed WebSocket handshake with browser debugger.")
+
+        def ws_send(msg_dict):
+            payload = json.dumps(msg_dict).encode("utf-8")
+            mask = os.urandom(4)
+            length = len(payload)
+            if length <= 125:
+                hdr = bytearray([0x81, 0x80 | length])
+            elif length <= 65535:
+                hdr = bytearray([0x81, 0x80 | 126]) + struct.pack(">H", length)
+            else:
+                hdr = bytearray([0x81, 0x80 | 127]) + struct.pack(">Q", length)
+            hdr += mask
+            masked = bytearray(payload[i] ^ mask[i % 4] for i in range(length))
+            ws_sock.sendall(bytes(hdr + masked))
+
+        def ws_recv():
+            hdr = ws_sock.recv(2)
+            if len(hdr) < 2:
+                return None
+            b1, b2 = hdr[0], hdr[1]
+            length = b2 & 0x7F
+            if length == 126:
+                length = struct.unpack(">H", ws_sock.recv(2))[0]
+            elif length == 127:
+                length = struct.unpack(">Q", ws_sock.recv(8))[0]
+            buf = b""
+            while len(buf) < length:
+                c = ws_sock.recv(min(4096, length - len(buf)))
+                if not c:
+                    break
+                buf += c
+            return json.loads(buf.decode("utf-8"))
+
+        if on_status_update:
+            on_status_update("Waiting for SSO / MFA authentication to complete in browser...")
+
+        # Poll cookies periodically until authenticated Blackboard session cookies appear
+        msg_id = 1
+        authenticated = False
+        login_poll_start = time.time()
+
+        while time.time() - login_poll_start < timeout_seconds:
+            if proc.poll() is not None:
+                # Browser was closed
+                break
+
+            msg_id += 1
+            ws_send({"id": msg_id, "method": "Network.getCookies"})
+            try:
+                resp = ws_recv()
+                if resp and "result" in resp and "cookies" in resp["result"]:
+                    cookies = resp["result"]["cookies"]
+                    cookie_names = {c.get("name"): c.get("value") for c in cookies}
+                    has_session = any(k in cookie_names for k in ("JSESSIONID", "bb_session", "session_id"))
+                    
+                    if has_session:
+                        # Verify session works against /learn/api/public/v1/users/me
+                        cj = http.cookiejar.CookieJar()
+                        for c in cookies:
+                            cj.set_cookie(http.cookiejar.Cookie(
+                                version=0,
+                                name=c.get("name"),
+                                value=c.get("value"),
+                                port=None,
+                                port_specified=False,
+                                domain=c.get("domain", "").lstrip("."),
+                                domain_specified=bool(c.get("domain")),
+                                domain_initial_dot=c.get("domain", "").startswith("."),
+                                path=c.get("path", "/"),
+                                path_specified=True,
+                                secure=bool(c.get("secure")),
+                                expires=int(c.get("expires", 0)) if c.get("expires", 0) > 0 else None,
+                                discard=False,
+                                comment=None,
+                                comment_url=None,
+                                rest={}
+                            ))
+                        test_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+                        test_req = urllib.request.Request(
+                            f"{clean_url.rstrip('/')}/learn/api/public/v1/users/me",
+                            headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
+                        )
+                        try:
+                            with test_opener.open(test_req, timeout=3.0) as verify_resp:
+                                if verify_resp.status == 200:
+                                    me = json.loads(verify_resp.read().decode("utf-8"))
+                                    if me.get("id"):
+                                        authenticated = True
+                                        captured_cookies = cookies
+                                        break
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            time.sleep(1.0)
+
+        if not authenticated:
+            raise RuntimeError("Authentication was not completed or the browser was closed.")
+
+        # Save cookies to persistent cookie jar
+        cookie_file = get_cookie_file_path()
+        os.makedirs(os.path.dirname(cookie_file), exist_ok=True)
+        lwp_cj = http.cookiejar.LWPCookieJar(cookie_file)
+        for c in captured_cookies:
+            lwp_cj.set_cookie(http.cookiejar.Cookie(
+                version=0,
+                name=c.get("name"),
+                value=c.get("value"),
+                port=None,
+                port_specified=False,
+                domain=c.get("domain", "").lstrip("."),
+                domain_specified=bool(c.get("domain")),
+                domain_initial_dot=c.get("domain", "").startswith("."),
+                path=c.get("path", "/"),
+                path_specified=True,
+                secure=bool(c.get("secure")),
+                expires=int(c.get("expires", 0)) if c.get("expires", 0) > 0 else None,
+                discard=False,
+                comment=None,
+                comment_url=None,
+                rest={}
+            ))
+        lwp_cj.save(ignore_discard=True, ignore_expires=True)
+
+        # Create client and query me
+        client = LMSClient()
+        me = client.get_json("/learn/api/public/v1/users/me")
+        return client, me
+    finally:
+        if ws_sock:
+            try:
+                ws_sock.close()
+            except Exception:
+                pass
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        import shutil
+        try:
+            shutil.rmtree(temp_profile, ignore_errors=True)
+        except Exception:
+            pass
+
+    """Return the persistent cookie jar file path."""
+    if STATE_DIR:
+        return os.path.join(STATE_DIR, "session_cookies.txt")
+    if sys.platform == "darwin":
+        base_dir = os.path.expanduser("~/Library/Application Support/BlackboardSentinel")
+    elif sys.platform == "win32":
+        appdata = os.getenv("APPDATA", os.path.expanduser("~"))
+        base_dir = os.path.join(appdata, "BlackboardSentinel")
+    else:
+        base_dir = os.path.expanduser("~/.blackboard-sentinel")
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, "session_cookies.txt")
+
+
+def has_valid_browser_session():
+    """Check if a saved cookie file exists and has content."""
+    cookie_file = get_cookie_file_path()
+    return os.path.isfile(cookie_file) and os.path.getsize(cookie_file) > 10
+
+
 def is_configured():
-    return bool(LMS_URL and USER_ID and PASSWORD)
+    return bool(LMS_URL and (has_valid_browser_session() or (USER_ID and PASSWORD)))
 
 
 # Initial configuration bootstrap on module load
@@ -526,12 +819,27 @@ class FileTooLargeError(Exception):
 
 
 class LMSClient:
-    def __init__(self, username, password):
+    def __init__(self, username="", password=""):
         self.username = username
         self.password = password
-        self.cj = http.cookiejar.CookieJar()
+        self.cookie_file = get_cookie_file_path()
+        self.cj = http.cookiejar.LWPCookieJar(self.cookie_file)
+        # Attempt to load existing persistent cookies if available
+        if os.path.exists(self.cookie_file):
+            try:
+                self.cj.load(ignore_discard=True, ignore_expires=True)
+            except Exception:
+                pass
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj))
         self._columns_cache = {}
+
+    def save_cookies(self):
+        """Persist cookies to disk."""
+        try:
+            os.makedirs(os.path.dirname(self.cookie_file), exist_ok=True)
+            self.cj.save(ignore_discard=True, ignore_expires=True)
+        except Exception:
+            pass
 
     def get_columns(self, cid):
         """Gradebook column list for a course, fetched at most once per client (shared by grades and deadlines)."""
@@ -541,6 +849,23 @@ class LMSClient:
 
     def login(self, timeout=DEFAULT_TIMEOUT):
         validate_blackboard_url(LMS_URL, timeout=5)
+
+        # Check if saved browser session cookies are already valid
+        if os.path.exists(self.cookie_file):
+            try:
+                me_data = self.get_json("/learn/api/public/v1/users/me", timeout=timeout)
+                if me_data and "id" in me_data:
+                    self.student_user_id = me_data["id"]
+                    if me_data.get("userName") and not self.username:
+                        self.username = me_data["userName"]
+                    return True
+            except Exception:
+                pass
+
+        if not self.username or not self.password:
+            raise ValueError(
+                "Browser session expired or credentials missing. Please sign in again or use 'Sign in through web portal'."
+            )
 
         req = urllib.request.Request(f"{LMS_URL}/webapps/login/", headers={"User-Agent": USER_AGENT})
         with self.opener.open(req, timeout=timeout) as resp:
@@ -575,6 +900,7 @@ class LMSClient:
             final_url = resp.geturl()
             if "login" in final_url.lower() or "relogin" in final_url.lower() or "loginerror" in final_url.lower():
                 raise ValueError("Invalid username or password. Please check your student ID and password.")
+        self.save_cookies()
         self.student_user_id = ""
         try:
             me_data = self.get_json("/learn/api/public/v1/users/me")

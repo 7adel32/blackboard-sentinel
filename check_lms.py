@@ -450,6 +450,8 @@ def run_browser_login_flow(portal_url, on_status_update=None, timeout_seconds=30
         except Exception:
             pass
 
+
+def get_cookie_file_path():
     """Return the persistent cookie jar file path."""
     if STATE_DIR:
         return os.path.join(STATE_DIR, "session_cookies.txt")

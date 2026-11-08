@@ -528,13 +528,33 @@ def fetch_all_available_courses(client):
     return discovered
 
 
+# Canonical Course Mappings: folder names and instructors
+CANONICAL_COURSE_MAP = {
+    "601 CSC": {"folder": "AI FUNDAMENTALS", "doctor": "د. عماد الحربي"},
+    "602 CSC": {"folder": "Mathematics for Machine Learning", "doctor": "د. محمد زيشان عالم"},
+    "605 CSC": {"folder": "advanced programming", "doctor": "د. أحمد مباركي"},
+    "608 CSC": {"folder": "research methods", "doctor": "د. محمد الوكيل"},
+}
+
+
 def get_courses_map(client):
-    """Dynamically discover enrolled courses from Blackboard, filtered by LMS_COURSES if configured."""
+    """Dynamically discover enrolled courses from Blackboard, filtered by LMS_COURSES if configured.
+    Maps courses to user's canonical folders (e.g. 'AI FUNDAMENTALS') if present, falling back to LMS_STORAGE_DIR."""
     courses_map = {}
     allowed_ids = set()
     courses_cfg = os.getenv("LMS_COURSES", "").strip()
     if courses_cfg:
         allowed_ids = set(x.strip() for x in courses_cfg.split(",") if x.strip())
+
+    # Detect user's main Documents folder where canonical course folders live
+    doc_candidates = [
+        os.getenv("LMS_DOCUMENTS_DIR", ""),
+        "/mnt/c/Users/Percent/Documents",
+        r"C:\Users\Percent\Documents",
+        os.path.expanduser("~/Documents"),
+        os.path.abspath(os.path.join(LMS_STORAGE_DIR, "..")) if LMS_STORAGE_DIR else ""
+    ]
+    canonical_root = next((d for d in doc_candidates if d and os.path.isdir(os.path.join(d, "AI FUNDAMENTALS"))), None)
 
     try:
         user_courses = client.get_json("/learn/api/public/v1/users/me/courses")
@@ -552,14 +572,22 @@ def get_courses_map(client):
             
             code_m = re.search(r'([0-9]{3}\s+[A-Za-z]+|[A-Za-z]+\s+[0-9]{3})', clean_name)
             code = code_m.group(0) if code_m else ""
-            
-            target_dir = os.path.join(LMS_STORAGE_DIR, clean_name)
+
+            # Check if canonical mapping exists
+            canonical = CANONICAL_COURSE_MAP.get(code)
+            if canonical and canonical_root and os.path.isdir(os.path.join(canonical_root, canonical["folder"])):
+                target_dir = os.path.join(canonical_root, canonical["folder"])
+                doctor = canonical.get("doctor", "")
+            else:
+                target_dir = os.path.join(LMS_STORAGE_DIR, clean_name)
+                doctor = canonical.get("doctor", "") if canonical else ""
+
             courses_map[cid] = {
                 "id": cid,
                 "code": code,
                 "name": clean_name,
                 "dir": target_dir,
-                "doctor": ""
+                "doctor": doctor
             }
     except Exception as e:
         print(f"Error discovering courses: {e}", file=sys.stderr)

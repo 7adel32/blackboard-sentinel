@@ -2059,7 +2059,9 @@ def _sync_course(client, cid, info, state):
     for k in _COURSE_LIST_KEYS:
         local[k] = list(state.get(k, []))
     for k in _COURSE_DICT_KEYS:
-        local[k] = dict(state.get(k, {}))
+        # Only copy keys that belong to this course (prefixed by cid) to avoid stale overwrites during merge
+        prefix = f"{cid}_"
+        local[k] = {k2: v2 for k2, v2 in state.get(k, {}).items() if k2.startswith(prefix)}
 
     new_reqs_local = []
     dl, new_reqs, ext_links = check_and_download_course_files(client, cid, info, local)

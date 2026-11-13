@@ -24,6 +24,10 @@ LIGHT_NOT_CONFIGURED = (217, 119, 6)     # #D97706 Deep Amber
 LIGHT_ERROR_RED = (220, 38, 38)          # #DC2626 Deep Red
 
 
+_DARWIN_THEME_CACHE = {"ts": 0.0, "is_light": True}
+_DARWIN_THEME_TTL = 2.0
+
+
 def is_system_taskbar_light():
     """Detect if the system taskbar/menu bar is configured in Light Theme."""
     if sys.platform == "win32":
@@ -36,20 +40,29 @@ def is_system_taskbar_light():
         except Exception:
             return False
     elif sys.platform == "darwin":
+        now = time.monotonic()
+        if now - _DARWIN_THEME_CACHE["ts"] < _DARWIN_THEME_TTL:
+            return _DARWIN_THEME_CACHE["is_light"]
+        is_light = True
         try:
-            import subprocess
-            res = subprocess.run(
-                ["defaults", "read", "-g", "AppleInterfaceStyle"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False
-            )
-            # If "Dark" in output, macOS is in Dark mode; otherwise Light mode
-            is_dark = "dark" in res.stdout.strip().lower()
-            return not is_dark
+            import AppKit
+            if AppKit.NSApp is not None:
+                match = AppKit.NSApp.effectiveAppearance().bestMatchFromAppearancesWithNames_(
+                    [AppKit.NSAppearanceNameAqua, AppKit.NSAppearanceNameDarkAqua]
+                )
+                is_light = (match != AppKit.NSAppearanceNameDarkAqua)
+            else:
+                from Foundation import NSUserDefaults
+                ud = NSUserDefaults.standardUserDefaults()
+                ud.synchronize()
+                style = ud.stringForKey_("AppleInterfaceStyle")
+                is_dark = bool(style and str(style).strip().lower() == "dark")
+                is_light = not is_dark
         except Exception:
-            return True
+            is_light = True
+        _DARWIN_THEME_CACHE["ts"] = now
+        _DARWIN_THEME_CACHE["is_light"] = is_light
+        return is_light
     return False
 
 

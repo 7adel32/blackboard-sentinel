@@ -20,6 +20,7 @@ import urllib.request
 import urllib.parse
 import http.cookiejar
 import copy
+import plistlib
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
@@ -78,8 +79,8 @@ def delete_keyring_password(username):
         return False
 
 
-def load_env_file(filepath):
-    """Load key-value pairs from a .env file into os.environ if not already set."""
+def load_env_file(filepath, override=False, _seen_keys=None):
+    """Load key-value pairs from a .env file into os.environ."""
     if not os.path.isfile(filepath):
         return
     try:
@@ -91,34 +92,56 @@ def load_env_file(filepath):
                 k, v = line.split("=", 1)
                 k = k.strip()
                 v = v.strip().strip("'\"")
-                if k and k not in os.environ:
+                if not k:
+                    continue
+                if _seen_keys is not None and k in _seen_keys:
+                    continue
+                if override or k not in os.environ:
                     os.environ[k] = v
+                if _seen_keys is not None:
+                    _seen_keys.add(k)
     except Exception:
         pass
 
 
-def init_config():
+def init_config(override=False):
     """Discover environment configuration from local .env, Hermes, or system paths."""
-    candidates = [
-        os.path.join(os.getcwd(), ".env"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
-        os.path.expanduser("~/.hermes/.env"),
-    ]
-    if sys.platform == "win32":
-        appdata = os.getenv("APPDATA", os.path.expanduser("~"))
-        candidates.append(os.path.join(appdata, "BlackboardSentinel", ".env"))
-    elif sys.platform == "darwin":
-        candidates.append(os.path.expanduser("~/Library/Application Support/BlackboardSentinel/.env"))
+    is_frozen = getattr(sys, "frozen", False)
+    candidates = []
+    if is_frozen:
+        if sys.platform == "win32":
+            appdata = os.getenv("APPDATA", os.path.expanduser("~"))
+            candidates.append(os.path.join(appdata, "BlackboardSentinel", ".env"))
+        elif sys.platform == "darwin":
+            candidates.append(os.path.expanduser("~/Library/Application Support/BlackboardSentinel/.env"))
+        candidates.append(os.path.join(os.getcwd(), ".env"))
+        candidates.append(os.path.expanduser("~/.hermes/.env"))
+    else:
+        candidates = [
+            os.path.join(os.getcwd(), ".env"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        ]
+        if sys.platform == "win32":
+            appdata = os.getenv("APPDATA", os.path.expanduser("~"))
+            candidates.append(os.path.join(appdata, "BlackboardSentinel", ".env"))
+        elif sys.platform == "darwin":
+            candidates.append(os.path.expanduser("~/Library/Application Support/BlackboardSentinel/.env"))
+        candidates.append(os.path.expanduser("~/.hermes/.env"))
 
+    seen_keys = set()
     for c in candidates:
         if os.path.isfile(c):
-            load_env_file(c)
+            load_env_file(c, override=override, _seen_keys=seen_keys)
 
     global LMS_URL, USER_ID, PASSWORD, STUDENT_USER_ID, LMS_STORAGE_DIR, LMS_COURSES, TRAY_THEME, STATE_DIR, STATE_FILE, LOGS_DIR, KEEP_ALL_ANNOUNCEMENTS, EXPAND_ZIPS, DELETE_ORIGINAL_ZIP, MAX_FILE_BYTES, MAX_WORKERS
 
     LMS_URL = os.getenv("LMS_URL", "").rstrip("/")
     USER_ID = os.getenv("LMS_USER_ID", "")
     PASSWORD = os.getenv("LMS_PASSWORD", "")
+    if override and USER_ID and "LMS_PASSWORD" not in seen_keys:
+        keyring_pwd = get_keyring_password(USER_ID)
+        if keyring_pwd:
+            PASSWORD = keyring_pwd
     if not PASSWORD and USER_ID:
         PASSWORD = get_keyring_password(USER_ID)
     elif PASSWORD and USER_ID:
@@ -176,6 +199,28 @@ def _parallel_map(fn, items):
         return [fn(i) for i in items]
     with ThreadPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(fn, items))
+
+
+def _get_ssl_context():
+    """Return an SSLContext with working CA certificates (handles macOS python.org/frozen bundles)."""
+    import ssl
+    env_ca = os.getenv("SSL_CERT_FILE")
+    if env_ca and os.path.isfile(env_ca):
+        return ssl.create_default_context(cafile=env_ca)
+    paths = ssl.get_default_verify_paths()
+    has_default_ca = bool(
+        (paths.cafile and os.path.isfile(paths.cafile))
+        or (paths.openssl_cafile and os.path.isfile(paths.openssl_cafile))
+    )
+    if sys.platform == "darwin" and not has_default_ca:
+        if os.path.isfile("/etc/ssl/cert.pem"):
+            return ssl.create_default_context(cafile="/etc/ssl/cert.pem")
+        try:
+            import certifi
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+    return ssl.create_default_context()
 
 
 def find_local_chromium_browser():
@@ -382,7 +427,10 @@ def run_browser_login_flow(portal_url, on_status_update=None, timeout_seconds=30
                                 comment_url=None,
                                 rest={}
                             ))
-                        test_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+                        test_opener = urllib.request.build_opener(
+                            urllib.request.HTTPSHandler(context=_get_ssl_context()),
+                            urllib.request.HTTPCookieProcessor(cj),
+                        )
                         test_req = urllib.request.Request(
                             f"{clean_url.rstrip('/')}/learn/api/public/v1/users/me",
                             headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -484,7 +532,7 @@ def fetch_all_available_courses(client):
     """Fetch all courses the user was ever enrolled in, sorted recent-to-ancient."""
     discovered = []
     try:
-        user_courses = client.get_json("/learn/api/public/v1/users/me/courses")
+        user_courses = client.get_paginated_json("/learn/api/public/v1/users/me/courses")
         if not user_courses or "results" not in user_courses:
             return []
         for enrollment in user_courses.get("results", []):
@@ -546,19 +594,26 @@ def get_courses_map(client):
     if courses_cfg:
         allowed_ids = set(x.strip() for x in courses_cfg.split(",") if x.strip())
 
-    # Detect user's main Documents folder where canonical course folders live
-    doc_candidates = [
-        os.getenv("LMS_DOCUMENTS_DIR", ""),
-        "/mnt/c/Users/Percent/Documents",
-        r"C:\Users\Percent\Documents",
-        os.path.expanduser("~/Documents"),
-        os.path.abspath(os.path.join(LMS_STORAGE_DIR, "..")) if LMS_STORAGE_DIR else ""
-    ]
+    default_storage = os.path.normpath(os.path.expanduser("~/Documents/University"))
+    configured_storage = os.path.normpath(os.path.abspath(LMS_STORAGE_DIR)) if LMS_STORAGE_DIR else ""
+    storage_is_custom = bool(configured_storage and configured_storage != default_storage)
+
+    # Detect user's main Documents folder where canonical course folders live (only for default storage)
+    if storage_is_custom:
+        doc_candidates = [os.getenv("LMS_DOCUMENTS_DIR", ""), configured_storage]
+    else:
+        doc_candidates = [
+            os.getenv("LMS_DOCUMENTS_DIR", ""),
+            "/mnt/c/Users/Percent/Documents",
+            r"C:\Users\Percent\Documents",
+            os.path.expanduser("~/Documents"),
+            os.path.abspath(os.path.join(LMS_STORAGE_DIR, "..")) if LMS_STORAGE_DIR else ""
+        ]
     canonical_root = next((d for d in doc_candidates if d and os.path.isdir(os.path.join(d, "AI FUNDAMENTALS"))), None)
 
     try:
-        user_courses = client.get_json("/learn/api/public/v1/users/me/courses")
-        for enrollment in user_courses.get("results", []):
+        user_courses = client.get_paginated_json("/learn/api/public/v1/users/me/courses")
+        for enrollment in (user_courses or {}).get("results", []):
             cid = enrollment.get("courseId")
             if not cid:
                 continue
@@ -777,7 +832,11 @@ def validate_blackboard_url(url, timeout=3.0):
             # 2. Probe Blackboard Learn Ultra portal signature
             probe_url = f"{clean}/webapps/login/"
             cj = http.cookiejar.CookieJar()
-            opener = urllib.request.build_opener(NoRedirectHandler(), urllib.request.HTTPCookieProcessor(cj))
+            opener = urllib.request.build_opener(
+                NoRedirectHandler(),
+                urllib.request.HTTPSHandler(context=_get_ssl_context()),
+                urllib.request.HTTPCookieProcessor(cj),
+            )
             req = urllib.request.Request(probe_url, headers={
                 "User-Agent": USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -861,7 +920,10 @@ class LMSClient:
                 self.cj.load(ignore_discard=True, ignore_expires=True)
             except Exception:
                 pass
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj))
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=_get_ssl_context()),
+            urllib.request.HTTPCookieProcessor(self.cj),
+        )
         self._columns_cache = {}
 
     def save_cookies(self):
@@ -875,7 +937,7 @@ class LMSClient:
     def get_columns(self, cid):
         """Gradebook column list for a course, fetched at most once per client (shared by grades and deadlines)."""
         if cid not in self._columns_cache:
-            self._columns_cache[cid] = self.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns")
+            self._columns_cache[cid] = self.get_paginated_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns")
         return self._columns_cache[cid]
 
     def login(self, timeout=DEFAULT_TIMEOUT):
@@ -953,12 +1015,31 @@ class LMSClient:
         except Exception:
             return None
 
-    def download_file(self, path_or_url, dest_path, max_bytes=0):
+    def get_paginated_json(self, path_or_url, timeout=DEFAULT_TIMEOUT, max_pages=50):
+        """Fetch a Blackboard REST collection and follow paging.nextPage links."""
+        data = self.get_json(path_or_url, timeout=timeout)
+        if not isinstance(data, dict) or "results" not in data:
+            return data
+        all_results = list(data.get("results") or [])
+        seen_urls = {path_or_url}
+        next_page = (data.get("paging") or {}).get("nextPage")
+        pages = 1
+        while next_page and next_page not in seen_urls and pages < max_pages:
+            seen_urls.add(next_page)
+            page_data = self.get_json(next_page, timeout=timeout)
+            pages += 1
+            if not isinstance(page_data, dict) or "results" not in page_data:
+                break
+            all_results.extend(page_data.get("results") or [])
+            next_page = (page_data.get("paging") or {}).get("nextPage")
+        return {"results": all_results}
+
+    def download_file(self, path_or_url, dest_path, max_bytes=0, timeout=60):
         url = path_or_url if path_or_url.startswith("http") else f"{LMS_URL}{path_or_url}"
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         tmp_dest = dest_path + ".part"
-        with self.opener.open(req) as resp:
+        with self.opener.open(req, timeout=timeout) as resp:
             cl = resp.headers.get("Content-Length")
             expected_bytes = int(cl) if cl and cl.isdigit() else None
             if max_bytes and expected_bytes is not None and expected_bytes > max_bytes:
@@ -1339,7 +1420,7 @@ def check_and_download_course_files(client, cid, info, state):
         item_modified = item.get("modified")
 
         # 1. Direct attachments
-        att_data = client.get_json(f"/learn/api/public/v1/courses/{cid}/contents/{item_id}/attachments")
+        att_data = client.get_paginated_json(f"/learn/api/public/v1/courses/{cid}/contents/{item_id}/attachments")
         if att_data and "results" in att_data:
             for att in att_data["results"]:
                 att_id = att.get("id")
@@ -1376,7 +1457,7 @@ def check_and_download_course_files(client, cid, info, state):
 
     def traverse_contents(parent_id=None, current_rel_dir="", active_request=None):
         url = f"/learn/api/public/v1/courses/{cid}/contents" if parent_id is None else f"/learn/api/public/v1/courses/{cid}/contents/{parent_id}/children"
-        data = client.get_json(url)
+        data = client.get_paginated_json(url)
         if not data or "results" not in data:
             return
 
@@ -1432,18 +1513,14 @@ def check_and_download_course_files(client, cid, info, state):
                 if link_key not in seen_links_set:
                     seen_links_set.add(link_key)
                     clean_lt = sanitize_filename(l_title or "External Resource")
-                    shortcut_fn = f"{clean_lt}.url"
                     if current_req is not None:
                         t_dir = current_req["req_dir"]
                     elif current_rel_dir:
                         t_dir = os.path.join(base_dir, current_rel_dir)
                     else:
                         t_dir = os.path.join(base_dir, "Announcements")
-                    os.makedirs(t_dir, exist_ok=True)
-                    sc_path = os.path.join(t_dir, shortcut_fn)
                     try:
-                        with open(sc_path, "w", encoding="utf-8") as sf:
-                            sf.write(f"[InternetShortcut]\r\nURL={l_url}\r\n")
+                        sc_path = _write_web_shortcut(t_dir, clean_lt, l_url)
                         try:
                             rel_sc = os.path.relpath(sc_path, LMS_STORAGE_DIR)
                         except ValueError:
@@ -1521,7 +1598,7 @@ def check_deadlines(client, state, courses_map=None):
     candidates = {}
 
     # Source 1: Blackboard Calendar Items (within 35 days)
-    cal = client.get_json(f"/learn/api/public/v1/calendars/items?since={since_str}&until={until_str}")
+    cal = client.get_paginated_json(f"/learn/api/public/v1/calendars/items?since={since_str}&until={until_str}")
     if cal and "results" in cal:
         for it in cal["results"]:
             due_str = it.get("end") or it.get("start")
@@ -1726,6 +1803,21 @@ def parse_announcement_media(body_html):
     return attachments, links
 
 
+def _write_web_shortcut(target_dir, clean_name, url):
+    """Write a clickable browser shortcut (.webloc on macOS, .url elsewhere) and return its path."""
+    os.makedirs(target_dir, exist_ok=True)
+    safe_name = sanitize_filename(clean_name) or "External Link"
+    if sys.platform == "darwin":
+        sc_path = os.path.join(target_dir, f"{safe_name}.webloc")
+        with open(sc_path, "wb") as sf:
+            sf.write(plistlib.dumps({"URL": url}))
+        return sc_path
+    sc_path = os.path.join(target_dir, f"{safe_name}.url")
+    with open(sc_path, "w", encoding="utf-8") as sf:
+        sf.write(f"[InternetShortcut]\r\nURL={url}\r\n")
+    return sc_path
+
+
 def get_link_shortcut_name(url, title=""):
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc or "link"
@@ -1802,7 +1894,7 @@ def check_announcements(client, cid, info, state, new_requests=None):
         f"/learn/api/public/v1/courses/{cid}/announcements",
         f"/learn/api/public/v1/announcements?courseId={cid}"
     ]:
-        data = client.get_json(ep)
+        data = client.get_paginated_json(ep)
         if data and "results" in data:
             for ann in data["results"]:
                 aid = ann.get("id")
@@ -1814,7 +1906,8 @@ def check_announcements(client, cid, info, state, new_requests=None):
 
     for ann in ann_candidates:
         ann_id = ann.get("id")
-        created_raw = ann.get("created", "")
+        avail_start = ((ann.get("availability") or {}).get("duration") or {}).get("start", "")
+        created_raw = ann.get("created") or ann.get("modified") or avail_start or ""
         formatted_date = ""
         if created_raw:
             try:
@@ -1854,20 +1947,22 @@ def check_announcements(client, cid, info, state, new_requests=None):
                 already_present = os.path.exists(target_path) or (zip_ext_dir and os.path.isdir(zip_ext_dir))
                 if not already_present:
                     try:
-                        client.download_file(af["url"], target_path)
+                        client.download_file(af["url"], target_path, max_bytes=MAX_FILE_BYTES)
                         expand_zip_archive(target_path)
+                    except FileTooLargeError as big:
+                        sys.stderr.write(f"Skipped announcement attachment {target_fname}: {big.size_bytes / 1048576:.1f} MB exceeds limit\n")
                     except Exception as e:
                         sys.stderr.write(f"Error downloading announcement attachment {target_fname}: {e}\n")
 
-            # Save external URLs as .url internet shortcuts into Announcements/
+            # Save external URLs as clickable web shortcuts (.webloc on macOS, .url elsewhere)
             for l_item in links:
                 l_url = l_item["url"]
                 s_name = get_link_shortcut_name(l_url, l_item.get("title", ""))
-                sc_path = os.path.join(ann_dir, f"{s_name}.url")
+                ext = ".webloc" if sys.platform == "darwin" else ".url"
+                sc_path = os.path.join(ann_dir, f"{s_name}{ext}")
                 if not os.path.exists(sc_path):
                     try:
-                        with open(sc_path, "w", encoding="utf-8") as sf:
-                            sf.write(f"[InternetShortcut]\r\nURL={l_url}\r\n")
+                        _write_web_shortcut(ann_dir, s_name, l_url)
                     except Exception:
                         pass
 
@@ -2004,7 +2099,7 @@ def check_grades(client, state, courses_map=None, student_user_id=None):
             attempt_tasks.append(None)
 
     attempt_results = _parallel_map(
-        lambda at: client.get_json(f"/learn/api/public/v1/courses/{at[0]}/gradebook/columns/{at[1]}/attempts") if at else None,
+        lambda at: client.get_paginated_json(f"/learn/api/public/v1/courses/{at[0]}/gradebook/columns/{at[1]}/attempts") if at else None,
         attempt_tasks
     )
 

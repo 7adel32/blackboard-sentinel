@@ -13,7 +13,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 # 1. Verify build environment
-if ! command -v pyinstaller &>/dev/null; then
+PYINSTALLER_BIN=""
+if command -v pyinstaller &>/dev/null; then
+    PYINSTALLER_BIN="$(command -v pyinstaller)"
+elif [ -x "${HOME}/.blackboard-sentinel/venv/bin/pyinstaller" ]; then
+    PYINSTALLER_BIN="${HOME}/.blackboard-sentinel/venv/bin/pyinstaller"
+else
     echo "Error: pyinstaller is not installed in the active environment."
     echo "Run: pip install pyinstaller"
     exit 1
@@ -22,7 +27,7 @@ fi
 # 2. Build .app bundle via PyInstaller spec
 echo "Compiling BlackboardSentinel.app bundle with PyInstaller..."
 rm -rf build dist/BlackboardSentinel dist/BlackboardSentinel.app
-pyinstaller --noconfirm --clean BlackboardSentinel_mac.spec
+"${PYINSTALLER_BIN}" --noconfirm --clean BlackboardSentinel_mac.spec
 
 if [ ! -d "dist/BlackboardSentinel.app" ]; then
     echo "Error: dist/BlackboardSentinel.app was not created."

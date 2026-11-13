@@ -20,6 +20,17 @@ fi
 PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 echo "Detected Python version: ${PY_VER}"
 
+if ! python3 -c 'import sys; assert sys.version_info >= (3, 10)' 2>/dev/null; then
+    echo "Error: Python 3.10+ is required (found ${PY_VER})."
+    exit 1
+fi
+
+if ! python3 -c 'import tkinter' 2>/dev/null; then
+    echo "Error: python3 tkinter support is missing."
+    echo "If using Homebrew Python, run: brew install python-tk@${PY_VER}"
+    exit 1
+fi
+
 # 2. Virtual environment setup
 VENV_DIR="${HOME}/.blackboard-sentinel/venv"
 mkdir -p "${HOME}/.blackboard-sentinel"
@@ -68,15 +79,24 @@ cat <<EOF > "${PLIST_FILE}"
 </plist>
 EOF
 
+if command -v plutil &>/dev/null; then
+    plutil -lint "${PLIST_FILE}" >/dev/null
+fi
 echo "Registered LaunchAgent at ${PLIST_FILE}"
 
-# 4. Prompt to start now
-read -p "Would you like to configure and start Blackboard Sentinel now? [Y/n]: " START_NOW
-START_NOW=${START_NOW:-Y}
+# 4. Prompt to start now (supports START_NOW env var or --no-launch flag)
+if [ "${1:-}" = "--no-launch" ]; then
+    START_NOW="n"
+elif [ -z "${START_NOW:-}" ]; then
+    read -r -p "Would you like to configure and start Blackboard Sentinel now? [Y/n]: " START_NOW || true
+    START_NOW=${START_NOW:-Y}
+fi
 
 if [[ "${START_NOW}" =~ ^[Yy]$ ]]; then
     echo "Starting Blackboard Sentinel in menu bar..."
-    "${VENV_DIR}/bin/python3" "${SCRIPT_DIR}/tray_app.py" &
+    nohup "${VENV_DIR}/bin/python3" "${SCRIPT_DIR}/tray_app.py" \
+        >> "${HOME}/Library/Logs/BlackboardSentinel/stdout.log" \
+        2>> "${HOME}/Library/Logs/BlackboardSentinel/stderr.log" </dev/null &
 fi
 
 echo ""

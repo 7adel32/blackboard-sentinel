@@ -65,7 +65,7 @@ def get_deadlines():
                     }
 
     # Load state to filter out already graded / submitted items
-    state_file = os.path.expanduser("~/.hermes/state/lms_tracker_state.json")
+    state_file = check_lms.STATE_FILE
     seen_grades = {}
     if os.path.exists(state_file):
         try:

@@ -10,8 +10,6 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-import check_lms
-
 
 def get_default_config_path():
     if sys.platform == "darwin":
@@ -25,12 +23,64 @@ def get_default_config_path():
     return os.path.join(config_dir, ".env")
 
 
+def _activate_macos_regular_app():
+    """Ensure macOS GUI dialog processes run as foreground regular apps with focus."""
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyRegular
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        app.activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
+
+
+def _make_button(parent, text, command=None, primary=False, bg="#E2E8F0", fg="#334155",
+                 activebackground=None, relief="flat", bd=0, padx=12, pady=6, bold=False):
+    """Create a native ttk.Button on macOS (avoids white-on-white Aqua tk.Button) and styled tk.Button elsewhere."""
+    if sys.platform == "darwin":
+        kwargs = {"text": text}
+        if command is not None:
+            kwargs["command"] = command
+        if primary:
+            kwargs["default"] = "active"
+        return ttk.Button(parent, **kwargs)
+
+    btn_kwargs = {
+        "text": text,
+        "font": ("Segoe UI", 9, "bold" if bold else "normal"),
+        "bg": bg,
+        "fg": fg,
+        "relief": relief,
+        "padx": padx,
+        "pady": pady,
+        "cursor": "hand2",
+    }
+    if bd:
+        btn_kwargs["bd"] = bd
+    if activebackground:
+        btn_kwargs["activebackground"] = activebackground
+    if command is not None:
+        btn_kwargs["command"] = command
+    return tk.Button(parent, **btn_kwargs)
+
+
 def load_existing_config():
-    paths = [
-        os.path.join(os.getcwd(), ".env"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
-        get_default_config_path()
-    ]
+    import check_lms
+    if getattr(sys, "frozen", False):
+        paths = [
+            get_default_config_path(),
+            os.path.join(os.getcwd(), ".env"),
+            os.path.expanduser("~/.hermes/.env"),
+        ]
+    else:
+        paths = [
+            os.path.join(os.getcwd(), ".env"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+            get_default_config_path(),
+            os.path.expanduser("~/.hermes/.env"),
+        ]
     data = {
         "LMS_URL": "",
         "LMS_USER_ID": "",
@@ -68,7 +118,13 @@ def load_existing_config():
 
 
 def show_config_dialog(on_saved_callback=None, parent=None):
+    if sys.platform == "darwin" and parent is None:
+        from config_gui_mac import show_config_dialog_mac
+        return show_config_dialog_mac(on_saved_callback=on_saved_callback)
+    import check_lms
     root = tk.Toplevel(parent) if parent else tk.Tk()
+    if not parent:
+        _activate_macos_regular_app()
     root.title("Blackboard Sentinel - Setup")
     root.geometry("560x720")
     root.minsize(500, 560)
@@ -95,8 +151,13 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     accent_color = "#2563EB"
     root.configure(bg=bg_color)
 
+    check_lms.init_config()
     current_data = load_existing_config()
-    is_settings = bool(current_data.get("LMS_URL") and current_data.get("LMS_USER_ID") and current_data.get("LMS_PASSWORD"))
+    has_sso_session = check_lms.has_valid_browser_session()
+    is_settings = bool(
+        current_data.get("LMS_URL")
+        and (has_sso_session or (current_data.get("LMS_USER_ID") and current_data.get("LMS_PASSWORD")))
+    )
     next_text = "Apply Settings" if is_settings else "Connect & Choose Subjects ->"
     if is_settings:
         root.title("Blackboard Sentinel - Settings")
@@ -146,10 +207,9 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     portal_opt_frame = tk.Frame(form1, bg=card_bg)
     portal_opt_frame.pack(fill="x", pady=(0, 10))
 
-    btn_web_login = tk.Button(
+    btn_web_login = _make_button(
         portal_opt_frame,
         text="Sign In Through Web Portal (SSO / MFA)",
-        font=("Segoe UI", 9),
         bg="#F1F5F9",
         fg="#1E293B",
         activebackground="#E2E8F0",
@@ -157,7 +217,6 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         bd=1,
         padx=10,
         pady=4,
-        cursor="hand2"
     )
     btn_web_login.pack(anchor="w")
 
@@ -282,29 +341,25 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     status_lbl1 = tk.Label(btn_bar1, text="", font=("Segoe UI", 9), bg=bg_color, fg="#64748B")
     status_lbl1.pack(side="left")
 
-    btn_next = tk.Button(
+    btn_next = _make_button(
         btn_bar1,
         text=next_text,
-        font=("Segoe UI", 9, "bold"),
+        primary=True,
         bg=accent_color,
         fg="#FFFFFF",
-        relief="flat",
         padx=16,
         pady=6,
-        cursor="hand2"
+        bold=True,
     )
     btn_next.pack(side="right")
 
-    btn_choose = tk.Button(
+    btn_choose = _make_button(
         btn_bar1,
         text="Choose Subjects",
-        font=("Segoe UI", 9),
         bg="#E2E8F0",
         fg="#334155",
-        relief="flat",
         padx=12,
         pady=6,
-        cursor="hand2"
     )
     if is_settings:
         btn_choose.pack(side="right", padx=(0, 8))
@@ -376,35 +431,41 @@ def show_config_dialog(on_saved_callback=None, parent=None):
 
     # Mousewheel scrolling
     def _on_mousewheel(event):
-        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        if not canvas.winfo_exists() or not event.delta:
+            return
+        if sys.platform == "darwin":
+            units = int(-event.delta)
+            if units == 0:
+                units = -1 if event.delta > 0 else 1
+        else:
+            units = int(-1 * (event.delta / 120))
+            if units == 0:
+                units = -1 if event.delta > 0 else 1
+        canvas.yview_scroll(units, "units")
     canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
     btn_bar2 = tk.Frame(step2_frame, bg=bg_color, padx=24, pady=10)
     btn_bar2.pack(fill="x", side="bottom")
 
-    btn_back = tk.Button(
+    btn_back = _make_button(
         btn_bar2,
         text="< Back",
-        font=("Segoe UI", 9),
         bg="#E2E8F0",
         fg="#334155",
-        relief="flat",
         padx=12,
         pady=6,
-        cursor="hand2"
     )
     btn_back.pack(side="left")
 
-    btn_save = tk.Button(
+    btn_save = _make_button(
         btn_bar2,
         text=("Done" if is_settings else "Save & Start Sentinel"),
-        font=("Segoe UI", 9, "bold"),
+        primary=True,
         bg=accent_color,
         fg="#FFFFFF",
-        relief="flat",
         padx=16,
         pady=6,
-        cursor="hand2"
+        bold=True,
     )
     btn_save.pack(side="right")
 
@@ -416,8 +477,16 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         lms_user = user_var.get().strip()
         lms_pass = pass_var.get().strip()
 
-        if not raw_url or not lms_user or not lms_pass:
-            messagebox.showerror("Missing Information", "Please enter LMS URL, Student ID, and Password.", parent=root)
+        if not raw_url:
+            messagebox.showerror("Missing Information", "Please enter LMS URL.", parent=root)
+            return
+
+        if not check_lms.has_valid_browser_session() and (not lms_user or not lms_pass):
+            messagebox.showerror(
+                "Missing Information",
+                "Please enter Student ID and Password, or use 'Sign In Through Web Portal'.",
+                parent=root
+            )
             return
 
         # Instant Client-Side Regex Validation (<1ms, no network delay)
@@ -632,7 +701,7 @@ LMS_EXPAND_ZIPS="{expand_zips}"
 LMS_DELETE_ORIGINAL_ZIP="{delete_zip}"
 LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
 """
-        # Save to AppData and local .env
+        # Save to AppData (and local .env only when running from source, never inside frozen bundles)
         appdata_env = get_default_config_path()
         try:
             with open(appdata_env, "w", encoding="utf-8") as f:
@@ -640,12 +709,13 @@ LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
         except Exception:
             pass
 
-        local_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-        try:
-            with open(local_env, "w", encoding="utf-8") as f:
-                f.write(env_content)
-        except Exception:
-            pass
+        if not getattr(sys, "frozen", False):
+            local_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+            try:
+                with open(local_env, "w", encoding="utf-8") as f:
+                    f.write(env_content)
+            except Exception:
+                pass
 
         # Update current process environment
         os.environ["LMS_URL"] = lms_url
@@ -660,7 +730,7 @@ LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
         os.environ["LMS_DELETE_ORIGINAL_ZIP"] = delete_zip
         os.environ["LMS_MAX_FILE_SIZE_MB"] = max_mb_str
 
-        check_lms.init_config()
+        check_lms.init_config(override=True)
         saved_flag["saved"] = True
         root.destroy()
         if on_saved_callback:
@@ -697,6 +767,8 @@ LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
     root.lift()
     root.attributes("-topmost", True)
     root.after_idle(root.attributes, "-topmost", False)
+    if not parent:
+        root.after(50, lambda: (_activate_macos_regular_app(), root.lift(), root.focus_force()))
 
     if not parent:
         root.mainloop()
@@ -705,7 +777,11 @@ LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
 
 
 def show_info_window(title, content):
+    if sys.platform == "darwin":
+        from config_gui_mac import show_info_window_mac
+        return show_info_window_mac(title, content)
     root = tk.Tk()
+    _activate_macos_regular_app()
     root.title(title)
     root.geometry("560x440")
     root.minsize(400, 300)
@@ -761,17 +837,16 @@ def show_info_window(title, content):
     btn_frame = tk.Frame(root, bg=bg_color, padx=16, pady=8)
     btn_frame.pack(fill="x", side="bottom")
 
-    btn_close = tk.Button(
+    btn_close = _make_button(
         btn_frame,
         text="Close",
-        font=("Segoe UI", 9, "bold"),
+        primary=True,
+        command=root.destroy,
         bg="#2563EB",
         fg="#FFFFFF",
-        relief="flat",
         padx=16,
         pady=4,
-        cursor="hand2",
-        command=root.destroy
+        bold=True,
     )
     btn_close.pack(side="right")
 
@@ -785,6 +860,7 @@ def show_info_window(title, content):
     root.lift()
     root.attributes("-topmost", True)
     root.after_idle(root.attributes, "-topmost", False)
+    root.after(50, lambda: (_activate_macos_regular_app(), root.lift(), root.focus_force()))
     root.mainloop()
 
 

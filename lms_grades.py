@@ -40,7 +40,8 @@ def get_all_grades():
             col_id = col.get("id")
             col_name = col.get("name") or "Item"
 
-            grade_data = client.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns/{col_id}/users/{getattr(client, "student_user_id", "")}")
+            student_uid = getattr(client, "student_user_id", "")
+            grade_data = client.get_json(f"/learn/api/public/v2/courses/{cid}/gradebook/columns/{col_id}/users/{student_uid}")
             if not grade_data:
                 continue
 

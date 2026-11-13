@@ -151,7 +151,7 @@ def init_config(override=False):
         except Exception:
             pass
     STUDENT_USER_ID = os.getenv("LMS_STUDENT_ID", "")
-    LMS_STORAGE_DIR = os.path.expanduser(os.getenv("LMS_STORAGE_DIR", "~/Documents/University"))
+    LMS_STORAGE_DIR = os.path.normpath(os.path.expanduser(os.getenv("LMS_STORAGE_DIR") or "~/Documents/University"))
     LMS_COURSES = os.getenv("LMS_COURSES", "")
     TRAY_THEME = os.getenv("TRAY_THEME", "auto")
     KEEP_ALL_ANNOUNCEMENTS = os.getenv("LMS_KEEP_ALL_ANNOUNCEMENTS", "false").lower() in ("true", "1", "yes")
@@ -171,10 +171,10 @@ def init_config(override=False):
     except ValueError:
         MAX_WORKERS = 0
 
-    hermes_state = os.path.expanduser("~/.hermes/state")
+    hermes_state = os.path.normpath(os.path.expanduser("~/.hermes/state"))
     if os.path.exists(hermes_state) or os.path.exists(os.path.expanduser("~/.hermes")):
         STATE_DIR = hermes_state
-        LOGS_DIR = os.path.expanduser("~/.hermes/logs")
+        LOGS_DIR = os.path.normpath(os.path.expanduser("~/.hermes/logs"))
     elif sys.platform == "win32":
         local_appdata = os.getenv("LOCALAPPDATA", os.path.expanduser("~"))
         STATE_DIR = os.path.join(local_appdata, "BlackboardSentinel", "state")
@@ -676,7 +676,14 @@ def send_to_chat(text, platform=None):
     if sys.platform == "win32":
         try:
             cmd = ["wsl.exe", "-e", "hermes", "send", "--to", target_platform, text]
-            res = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res = subprocess.run(
+                cmd,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
             if res.returncode == 0:
                 return
         except Exception:
@@ -701,7 +708,14 @@ def send_windows_toast(title, message):
     [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Blackboard Sentinel').Show($toast)
     """
     try:
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            check=False,
+        )
     except Exception:
         pass
 
@@ -1813,7 +1827,7 @@ def _write_web_shortcut(target_dir, clean_name, url):
             sf.write(plistlib.dumps({"URL": url}))
         return sc_path
     sc_path = os.path.join(target_dir, f"{safe_name}.url")
-    with open(sc_path, "w", encoding="utf-8") as sf:
+    with open(sc_path, "w", encoding="utf-8", newline="") as sf:
         sf.write(f"[InternetShortcut]\r\nURL={url}\r\n")
     return sc_path
 

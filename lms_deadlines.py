@@ -137,7 +137,14 @@ def send_to_chat(text, platform=None):
     if sys.platform == "win32":
         try:
             cmd = ["wsl.exe", "-e", "hermes", "send", "--to", target_platform, text]
-            subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                cmd,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
         except Exception:
             pass
 

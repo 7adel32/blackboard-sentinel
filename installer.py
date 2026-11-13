@@ -21,15 +21,17 @@ def stop_active_processes():
     try:
         my_pid = os.getpid()
         ps_cmd = (
-            f"Get-Process -Name 'BlackboardSentinel' -ErrorAction SilentlyContinue | "
-            f"Where-Object {{ $_.Id -ne {my_pid} }} | Stop-Process -Force -ErrorAction SilentlyContinue; "
-            f"Get-Process -Name 'pythonw' -ErrorAction SilentlyContinue | "
-            f"Where-Object {{ $_.CommandLine -match 'tray_app.py' }} | Stop-Process -Force -ErrorAction SilentlyContinue"
+            "Get-CimInstance Win32_Process -Filter "
+            "\"Name='BlackboardSentinel.exe' OR Name='python.exe' OR Name='pythonw.exe'\" | "
+            f"Where-Object {{ $_.ProcessId -ne {my_pid} -and ($_.Name -eq 'BlackboardSentinel.exe' -or $_.CommandLine -match 'tray_app\\.py') }} | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
         )
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
             check=False
         )
         time.sleep(0.8)
@@ -83,8 +85,10 @@ def create_shortcut(target, shortcut_path, description=""):
         )
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_code],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
             check=False
         )
     except Exception:

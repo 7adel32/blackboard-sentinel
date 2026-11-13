@@ -16,12 +16,18 @@ from tkinter import messagebox
 
 def stop_active_processes():
     try:
+        ps_cmd = (
+            "Get-CimInstance Win32_Process -Filter "
+            "\"Name='BlackboardSentinel.exe' OR Name='python.exe' OR Name='pythonw.exe'\" | "
+            "Where-Object { $_.Name -eq 'BlackboardSentinel.exe' -or $_.CommandLine -match 'tray_app\\.py' } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+        )
         subprocess.run(
-            ["powershell", "-NoProfile", "-Command", 
-             "Get-Process -Name 'BlackboardSentinel' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; "
-             "Get-Process -Name 'pythonw' -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'tray_app.py' } | Stop-Process -Force -ErrorAction SilentlyContinue"],
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
             check=False
         )
     except Exception:
@@ -59,8 +65,10 @@ def remove_scheduled_task():
     try:
         subprocess.run(
             ["schtasks", "/delete", "/tn", "BlackboardSentinel", "/f"],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
             check=False
         )
     except Exception:

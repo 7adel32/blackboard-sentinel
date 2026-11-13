@@ -13,6 +13,52 @@ import threading
 import subprocess
 from datetime import datetime
 
+_NULL_STDIO_LOG_HANDLE = None
+
+
+def _default_app_log_dir():
+    if sys.platform == "win32":
+        base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "BlackboardSentinel")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Logs/BlackboardSentinel")
+    return os.path.expanduser("~/.local/share/BlackboardSentinel")
+
+
+def _redirect_null_stdio(log_dir=None, max_bytes=2 * 1024 * 1024):
+    """Redirect None stdout/stderr (e.g. Windows --noconsole builds) to a rotating UTF-8 log."""
+    global _NULL_STDIO_LOG_HANDLE
+    if sys.stdout is not None and sys.stderr is not None:
+        return None
+    target_dir = log_dir or _default_app_log_dir()
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        log_path = os.path.join(target_dir, "app.log")
+        if os.path.exists(log_path) and os.path.getsize(log_path) >= max_bytes:
+            rotated = os.path.join(target_dir, "app.log.1")
+            try:
+                os.replace(log_path, rotated)
+            except OSError:
+                pass
+        handle = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+        _NULL_STDIO_LOG_HANDLE = handle
+        if sys.stdout is None:
+            sys.stdout = handle
+        if sys.stderr is None:
+            sys.stderr = handle
+        return log_path
+    except Exception:
+        devnull = open(os.devnull, "w", encoding="utf-8")
+        _NULL_STDIO_LOG_HANDLE = devnull
+        if sys.stdout is None:
+            sys.stdout = devnull
+        if sys.stderr is None:
+            sys.stderr = devnull
+        return None
+
+
+_redirect_null_stdio()
+
 def _run_info_dialog_helper():
     title = "Blackboard Sentinel"
     content = ""
@@ -33,6 +79,7 @@ if __name__ == "__main__" and "--info-dialog" in sys.argv:
     sys.exit(_run_info_dialog_helper())
 
 import check_lms
+import app_meta
 from tray_icon import TrayIconTheme
 
 
@@ -156,13 +203,19 @@ def close_other_instances():
     if sys.platform == "win32":
         try:
             ps_cmd = (
-                f"Get-Process -Name 'BlackboardSentinel' -ErrorAction SilentlyContinue | "
-                f"Where-Object {{ $_.Id -ne {my_pid} }} | Stop-Process -Force -ErrorAction SilentlyContinue"
+                "Get-CimInstance Win32_Process -Filter "
+                "\"Name='BlackboardSentinel.exe' OR Name='python.exe' OR Name='pythonw.exe'\" | "
+                f"Where-Object {{ $_.ProcessId -ne {my_pid} -and $_.ProcessId -ne {parent_pid} "
+                "-and ($_.Name -eq 'BlackboardSentinel.exe' -or $_.CommandLine -match 'tray_app\\.py') "
+                "-and $_.CommandLine -notmatch '--(config|info)-dialog' } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
             )
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_cmd],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
                 check=False,
             )
         except Exception:
@@ -234,6 +287,7 @@ class SentinelTrayApp:
 
         self.is_running = True
         self.is_checking = False
+        self.is_updating = False
         self.last_check_time = None
         self.state_start_time = time.time()
         self._anim_thread = None
@@ -243,6 +297,8 @@ class SentinelTrayApp:
         self._anim_dispatch_pending = False
         self._config_proc = None
         self._config_lock = threading.Lock()
+        self._update_lock = threading.Lock()
+        self._last_update_check = 0.0
         self.icon = None
 
     def get_tooltip(self):
@@ -279,7 +335,11 @@ class SentinelTrayApp:
 
             _run_on_main_thread(_flush)
         else:
-            self.icon.icon = image
+            try:
+                self.icon.icon = image
+            except Exception:
+                if self.is_running:
+                    raise
 
     def set_state(self, state, message=""):
         self.current_state = state
@@ -292,8 +352,12 @@ class SentinelTrayApp:
 
             def _apply():
                 if self.icon and self.is_running:
-                    self.icon.title = tooltip
-                    self.icon.icon = image
+                    try:
+                        self.icon.title = tooltip
+                        self.icon.icon = image
+                    except Exception:
+                        if self.is_running:
+                            raise
 
             _run_on_main_thread(_apply)
 
@@ -436,13 +500,92 @@ class SentinelTrayApp:
         except Exception:
             pass
 
+    def _auto_update_enabled(self):
+        if sys.platform != "win32" or not getattr(sys, "frozen", False):
+            return False
+        raw = os.getenv("LMS_AUTO_UPDATE", "true").strip().lower()
+        return raw not in ("0", "false", "no", "off")
+
+    def _prepare_for_update_exit(self):
+        self.is_running = False
+        remove_pid_file()
+        if self.icon:
+            try:
+                self.icon.visible = False
+            except Exception:
+                pass
+            try:
+                self.icon.stop()
+            except Exception:
+                pass
+
+    def trigger_update_check_async(self, manual=False):
+        if sys.platform != "win32":
+            return
+        if self.is_updating:
+            return
+        threading.Thread(
+            target=self._run_update_worker,
+            kwargs={"manual": manual},
+            daemon=True,
+        ).start()
+
+    def _run_update_worker(self, manual=False):
+        if sys.platform != "win32":
+            return
+        if not self._update_lock.acquire(blocking=False):
+            return
+        self.is_updating = True
+        try:
+            import updater
+
+            self._last_update_check = time.time()
+            update_info = updater.check_for_update()
+            if not update_info:
+                if manual and self.is_running:
+                    self._show_info(
+                        "Blackboard Sentinel Updates",
+                        f"Blackboard Sentinel is up to date (v{app_meta.APP_VERSION}).",
+                    )
+                return
+
+            new_ver = update_info.get("version") or update_info.get("tag_name") or "latest"
+            if self.icon:
+                try:
+                    self.icon.notify(
+                        f"Downloading Blackboard Sentinel v{new_ver} update...",
+                        "Blackboard Sentinel",
+                    )
+                except Exception:
+                    pass
+            installer_path = updater.download_installer(update_info)
+            updater.launch_silent_installer(
+                installer_path,
+                before_exit_callback=self._prepare_for_update_exit,
+                exit_process=True,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            print(f"[updater] Update check failed: {err_msg}", file=sys.stderr)
+            if manual and self.is_running:
+                self._show_info(
+                    "Blackboard Sentinel Updates",
+                    f"Unable to check for updates:\n{err_msg}",
+                )
+        finally:
+            self.is_updating = False
+            self._update_lock.release()
+
     def scheduler_loop(self):
         """Background thread executing periodic checks plus cheap offline deadline reminders."""
         # Initial check after 5 seconds of launch
         time.sleep(5)
         reminder_interval = 3600  # seconds; offline, only reads the local state file
+        update_interval = 86400  # seconds; daily silent GitHub Releases check on frozen win32
         while self.is_running:
             self.trigger_check_async()
+            if self._auto_update_enabled() and (time.time() - self._last_update_check) >= update_interval:
+                self.trigger_update_check_async(manual=False)
             # Wait for next interval in small slices to respond quickly to shutdown
             elapsed = 0
             while elapsed < self.check_interval_seconds:
@@ -472,7 +615,7 @@ class SentinelTrayApp:
         self.trigger_check_async()
 
     def on_open_folder(self, icon, item):
-        folder = os.path.expanduser(os.getenv("LMS_STORAGE_DIR", "~/Documents/University"))
+        folder = os.path.expanduser(os.getenv("LMS_STORAGE_DIR") or "~/Documents/University")
         os.makedirs(folder, exist_ok=True)
         if sys.platform == "win32":
             os.startfile(folder)
@@ -579,6 +722,9 @@ class SentinelTrayApp:
                 daemon=True,
             ).start()
 
+    def on_check_updates(self, icon, item):
+        self.trigger_update_check_async(manual=True)
+
     def on_exit(self, icon, item):
         self.is_running = False
         if self.icon:
@@ -596,16 +742,21 @@ class SentinelTrayApp:
 
         initial_image = self.theme.get_image(self.current_state)
 
-        menu = pystray.Menu(
+        menu_items = [
             pystray.MenuItem("Open Course Folder", self.on_open_folder, default=True),
             pystray.MenuItem("Check Now", self.on_check_now),
             pystray.MenuItem("Upcoming Deadlines", self.on_view_deadlines),
             pystray.MenuItem("Grades & Feedback", self.on_view_grades),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Configure Settings", self.on_configure),
+        ]
+        if sys.platform == "win32":
+            menu_items.append(pystray.MenuItem("Check for Updates", self.on_check_updates))
+        menu_items.extend([
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", self.on_exit),
-        )
+        ])
+        menu = pystray.Menu(*menu_items)
 
         self.icon = pystray.Icon(
             "BlackboardSentinel",

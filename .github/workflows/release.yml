@@ -17,7 +17,51 @@ permissions:
   contents: write
 
 jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Release Tag
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "${{ github.ref }}" =~ ^refs/tags/v.* ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            git fetch --tags --force
+            HEAD_TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+            if [ -n "$HEAD_TAG" ]; then
+              TAG="$HEAD_TAG"
+            else
+              LATEST_TAG=$(git tag -l "v*.*.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+              if [ -z "$LATEST_TAG" ]; then
+                TAG="v1.1.4"
+              else
+                V_NUM="${LATEST_TAG#v}"
+                MAJOR=$(echo "$V_NUM" | cut -d. -f1)
+                MINOR=$(echo "$V_NUM" | cut -d. -f2)
+                PATCH=$(echo "$V_NUM" | cut -d. -f3)
+                PATCH=$((PATCH + 1))
+                TAG="v${MAJOR}.${MINOR}.${PATCH}"
+              fi
+            fi
+          fi
+          VERSION="${TAG#v}"
+          echo "Resolved release tag: $TAG (version $VERSION)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   build-windows:
+    needs: resolve-version
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -36,12 +80,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller pywin32
 
+      - name: Run unit tests
+        run: |
+          python -m unittest discover -s tests -v
+
+      - name: Generate release metadata
+        shell: pwsh
+        run: |
+          $version = "${{ needs.resolve-version.outputs.version }}"
+          $repo = "${{ github.repository }}"
+          @"
+          APP_VERSION = "$version"
+          GITHUB_REPO = "$repo"
+          "@ | Out-File -FilePath "_release_meta.py" -Encoding utf8
+
       - name: Build bundled executables (PyInstaller)
         run: |
           pyinstaller --noconfirm BlackboardSentinel.spec
           pyinstaller --noconfirm BlackboardSentinelCLI.spec
-          pyinstaller --noconfirm uninstall.spec
-          pyinstaller --noconfirm installer.spec
+
+      - name: Install & compile Inno Setup 6 installer
+        shell: pwsh
+        run: |
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $iscc) {
+            foreach ($candidate in @(
+              "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            )) {
+              if (Test-Path $candidate) { $iscc = $candidate; break }
+            }
+          }
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DMyAppVersion=${{ needs.resolve-version.outputs.version }}" installer.iss
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -49,9 +124,7 @@ jobs:
           name: BlackboardSentinel-Windows
           path: |
             dist/BlackboardSentinelSetup.exe
-            dist/BlackboardSentinel.exe
             dist/BlackboardSentinelCLI.exe
-            dist/uninstall.exe
 
   build-macos:
     runs-on: macos-latest
@@ -85,14 +158,9 @@ jobs:
             dist/BlackboardSentinel.dmg
 
   release:
-    needs: [build-windows, build-macos]
+    needs: [resolve-version, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
@@ -105,45 +173,13 @@ jobs:
           name: BlackboardSentinel-macOS
           path: dist-macos
 
-      - name: Determine Release Tag
-        id: version
-        shell: bash
-        run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            TAG="${{ inputs.tag }}"
-          elif [[ "${{ github.ref }}" =~ ^refs/tags/v.* ]]; then
-            TAG="${{ github.ref_name }}"
-          else
-            git fetch --tags --force
-            HEAD_TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
-            if [ -n "$HEAD_TAG" ]; then
-              TAG="$HEAD_TAG"
-            else
-              LATEST_TAG=$(git tag -l "v*.*.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
-              if [ -z "$LATEST_TAG" ]; then
-                TAG="v1.1.4"
-              else
-                # Increment patch version
-                V_NUM="${LATEST_TAG#v}"
-                MAJOR=$(echo "$V_NUM" | cut -d. -f1)
-                MINOR=$(echo "$V_NUM" | cut -d. -f2)
-                PATCH=$(echo "$V_NUM" | cut -d. -f3)
-                PATCH=$((PATCH + 1))
-                TAG="v${MAJOR}.${MINOR}.${PATCH}"
-              fi
-            fi
-          fi
-          echo "Resolved release tag: $TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.resolve-version.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
             dist-windows/BlackboardSentinelSetup.exe
-            dist-windows/BlackboardSentinel.exe
             dist-windows/BlackboardSentinelCLI.exe
             dist-macos/BlackboardSentinel.dmg

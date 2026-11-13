@@ -7,6 +7,7 @@ logs/
 .DS_Store
 build/
 dist/
+_release_meta.py
 .gemini/
 *.png
 !assets/*.png

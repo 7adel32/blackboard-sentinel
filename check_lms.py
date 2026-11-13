@@ -15,13 +15,18 @@ import json
 import html
 import re
 import time
+import hashlib
+import shutil
+import stat
 import subprocess
+import tempfile
 import urllib.request
 import urllib.parse
 import http.cookiejar
 import copy
 import plistlib
 import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
@@ -766,7 +771,8 @@ def load_state():
         "alerted_deadlines": {},
         "seen_announcements": [],
         "seen_grades": {},
-        "seen_links": []
+        "seen_links": [],
+        "expanded_zips": {}
     }
 
 
@@ -1272,6 +1278,264 @@ def find_target_subfolder(base_dir, context_hint):
     return base_dir
 
 
+_ZIP_MAX_DEPTH = 3
+_ZIP_MAX_ENTRIES = 10_000
+_ZIP_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_ZIP_BOMB_RATIO = 100
+_ZIP_BOMB_MIN_BYTES = 100 * 1024 * 1024
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+_OS_JUNK_NAMES = {"__macosx", ".ds_store", "thumbs.db", "desktop.ini"}
+_GENERIC_WRAPPER_DIRS = {
+    "files", "file", "folder", "folders", "content", "contents",
+    "archive", "archives", "root", "extracted", "output",
+    "download", "downloads", "upload", "uploads", "attachment", "attachments",
+}
+_GENERIC_DOC_WORDS = {
+    "slide", "slides", "lecture", "lectures", "lec", "lecs", "note", "notes",
+    "doc", "docs", "document", "documents", "file", "files", "attachment", "attachments",
+    "report", "paper", "assignment", "assignments", "hw", "homework", "lab", "labs",
+    "task", "tasks", "exercise", "exercises", "project", "solution", "solutions", "sol",
+    "answer", "answers", "handout", "worksheet", "syllabus", "outline", "summary",
+    "review", "guide", "instruction", "instructions", "readme", "index", "main", "app",
+    "code", "script", "data", "dataset", "sheet", "table", "presentation", "deck",
+    "exam", "quiz", "midterm", "final", "test", "practice", "sample", "example",
+    "template", "untitled", "new", "download", "scan", "page", "part", "ch", "chapter",
+    "week", "module", "unit", "lesson", "session", "section", "output", "result",
+    "draft", "version", "ver", "copy", "updated", "revised", "v",
+    "ملف", "محاضرة", "واجب", "ملخص", "سلايدات", "مستند", "حل", "تقرير", "ورقة", "نموذج",
+}
+
+
+def _win_long_path(path):
+    """Add the Windows extended-length prefix when an absolute path approaches MAX_PATH."""
+    if sys.platform != "win32":
+        return path
+    abspath = os.path.abspath(path)
+    if abspath.startswith("\\\\?\\") or len(abspath) < 240:
+        return path
+    if abspath.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abspath.lstrip("\\")
+    return "\\\\?\\" + abspath
+
+
+def _rmtree_readonly_safe(path):
+    """Remove a directory tree even when extracted archive entries are marked read-only."""
+    target = _win_long_path(path)
+    if not os.path.exists(target):
+        return
+
+    def _make_writable(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+            func(p)
+        except Exception:
+            pass
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(target, onexc=_make_writable)
+    else:
+        shutil.rmtree(target, onerror=_make_writable)
+
+
+def _decode_zip_member_name(member):
+    """Recover UTF-8, CP1256 (Arabic), or CP1252 filenames when the zip UTF-8 flag is unset."""
+    name = member.filename
+    if (member.flag_bits & 0x800) or name.isascii():
+        return name
+    try:
+        raw = name.encode("cp437")
+    except UnicodeEncodeError:
+        return name
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    # Box-drawing / Greek / math chars are strong indicators of CP1256 or CP1252 bytes decoded as CP437
+    has_cp437_artifacts = any(
+        ("\u2500" <= ch <= "\u259f") or ("\u0391" <= ch <= "\u03c9") or ("\u2200" <= ch <= "\u22ff")
+        for ch in name
+    )
+    if has_cp437_artifacts:
+        try:
+            cp1256_text = raw.decode("cp1256")
+            if any("\u0600" <= ch <= "\u06ff" for ch in cp1256_text):
+                return cp1256_text
+        except UnicodeDecodeError:
+            pass
+        try:
+            cp1252_text = raw.decode("cp1252")
+            if cp1252_text.isprintable():
+                return cp1252_text
+        except UnicodeDecodeError:
+            pass
+    return name
+
+
+def _sanitize_zip_segment(seg):
+    """Sanitize a single path segment for safe Windows and POSIX filesystem extraction."""
+    seg = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", seg)
+    seg = re.sub(r'[\\/*?:"<>|\x00-\x1f]', "_", seg).strip()
+    seg = seg.rstrip(". ")
+    if not seg:
+        return "_"
+    stem = seg.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        seg = f"_{seg}"
+    return seg
+
+
+def _parse_zip_member_parts(raw_name):
+    """Normalize an archive path into sanitized segments, returning None for traversal or OS junk."""
+    normalized = raw_name.replace("\\", "/")
+    if re.match(r"^[a-zA-Z]:", normalized):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
+    raw_parts = [p for p in normalized.split("/") if p and p != "."]
+    if not raw_parts or any(p == ".." for p in raw_parts):
+        return None
+    for idx, part in enumerate(raw_parts):
+        low = part.lower()
+        if low in _OS_JUNK_NAMES:
+            return None
+        if idx == len(raw_parts) - 1 and low.startswith("._"):
+            return None
+    return [_sanitize_zip_segment(p) for p in raw_parts]
+
+
+def _norm_archive_name(name):
+    """Normalize a folder or document stem for fuzzy matching across separators."""
+    return re.sub(r"[^a-z0-9\u0600-\u06ff]+", "", name.lower())
+
+
+def _is_generic_doc_name(filename, zip_stem):
+    """Return True when a single extracted document has a generic name lacking zip context."""
+    doc_stem, _ = os.path.splitext(filename)
+    norm_doc = _norm_archive_name(doc_stem)
+    norm_zip = _norm_archive_name(zip_stem)
+    if norm_zip and len(norm_zip) >= 3 and (norm_doc == norm_zip or norm_zip in norm_doc):
+        return False
+    if not norm_doc or len(norm_doc) <= 3 or norm_doc.isdigit():
+        return True
+    tokens = [t for t in re.split(r"[^a-zA-Z0-9\u0600-\u06ff]+", doc_stem.lower()) if t]
+    meaningful_tokens = [t for t in tokens if not t.isdigit() and not re.fullmatch(r"v\d+", t)]
+    if not meaningful_tokens:
+        return True
+    return all(t in _GENERIC_DOC_WORDS for t in meaningful_tokens)
+
+
+def _collapse_common_dirs(dir_chains, zip_stem):
+    """
+    Compute the common directory chain shared by all archive files, strip directories
+    matching the zip stem or generic wrappers, and collapse multi-level single-child
+    chains down to at most the innermost distinct directory.
+    """
+    if not dir_chains:
+        return [], 0
+    common = list(dir_chains[0])
+    for chain in dir_chains[1:]:
+        limit = min(len(common), len(chain))
+        i = 0
+        while i < limit and common[i] == chain[i]:
+            i += 1
+        common = common[:i]
+        if not common:
+            break
+    if not common:
+        return [], 0
+
+    norm_zip = _norm_archive_name(zip_stem)
+    distinct = [
+        d for d in common
+        if _norm_archive_name(d) != norm_zip and d.lower() not in _GENERIC_WRAPPER_DIRS
+    ]
+    kept_prefix = [distinct[-1]] if distinct else []
+    return kept_prefix, len(common)
+
+
+def _files_identical(path_a, path_b):
+    """Return True if two files exist and have identical size and SHA-256 content."""
+    pa = _win_long_path(path_a)
+    pb = _win_long_path(path_b)
+    if not (os.path.isfile(pa) and os.path.isfile(pb)):
+        return False
+    if os.path.getsize(pa) != os.path.getsize(pb):
+        return False
+
+    def _sha256(p):
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    return _sha256(pa) == _sha256(pb)
+
+
+def _merge_tree_into(src_dir, dst_dir):
+    """Move extracted contents from staging directory into dst_dir, overwriting colliding files."""
+    os.makedirs(_win_long_path(dst_dir), exist_ok=True)
+    for root, dirs, files in os.walk(src_dir):
+        rel_root = os.path.relpath(root, src_dir)
+        dst_root = dst_dir if rel_root == "." else os.path.join(dst_dir, rel_root)
+        os.makedirs(_win_long_path(dst_root), exist_ok=True)
+        for d in dirs:
+            os.makedirs(_win_long_path(os.path.join(dst_root, d)), exist_ok=True)
+        for fname in files:
+            src_file = _win_long_path(os.path.join(root, fname))
+            dst_file = _win_long_path(os.path.join(dst_root, fname))
+            if os.path.isdir(dst_file):
+                _rmtree_readonly_safe(dst_file)
+            os.replace(src_file, dst_file)
+
+
+def _inspect_zip_plan(zf, zip_stem, budget):
+    """
+    Validate archive members against encryption, symlink, and zip-bomb limits, then
+    classify the extraction layout as 'encrypted', 'bomb', 'empty', 'single_doc', or 'dir'.
+    """
+    valid_files = []
+    for member in zf.infolist():
+        if member.flag_bits & 0x1:
+            return "encrypted", [], []
+        mode = (member.external_attr >> 16) & 0o170000
+        if stat.S_ISLNK(mode):
+            continue
+        decoded_name = _decode_zip_member_name(member)
+        if member.is_dir() or decoded_name.replace("\\", "/").endswith("/"):
+            continue
+        parts = _parse_zip_member_parts(decoded_name)
+        if not parts:
+            continue
+        if budget["entries_used"] + len(valid_files) + 1 > budget["max_entries"]:
+            return "bomb", [], []
+        if member.file_size < 0 or budget["bytes_used"] + member.file_size > budget["max_bytes"]:
+            return "bomb", [], []
+        if (
+            member.file_size > _ZIP_BOMB_MIN_BYTES
+            and member.compress_size > 0
+            and (member.file_size / member.compress_size) > _ZIP_BOMB_RATIO
+        ):
+            return "bomb", [], []
+        valid_files.append((member, parts))
+
+    if not valid_files:
+        return "empty", [], []
+
+    kept_prefix, strip_len = _collapse_common_dirs([parts[:-1] for _, parts in valid_files], zip_stem)
+    planned = [(member, kept_prefix + parts[strip_len:]) for member, parts in valid_files]
+
+    if len(planned) == 1 and not kept_prefix and len(planned[0][1]) == 1:
+        only_name = planned[0][1][0]
+        if not only_name.lower().endswith(".zip") and not _is_generic_doc_name(only_name, zip_stem):
+            return "single_doc", planned, []
+
+    return "dir", planned, []
+
+
 def get_zip_extract_dir(zip_path):
     """Return the target extraction folder '<stem>_zip' in the same directory as zip_path."""
     parent = os.path.dirname(zip_path)
@@ -1282,38 +1546,150 @@ def get_zip_extract_dir(zip_path):
     return os.path.join(parent, f"{base}_zip")
 
 
-def expand_zip_archive(zip_path, bb_ts=None):
+def _resolve_recorded_zip_path(expanded_zips, key, base_dir, fallback_zip_path=None):
+    """Resolve a previously expanded zip target (file or directory) if it still exists on disk."""
+    val = expanded_zips.get(key) if expanded_zips else None
+    if val:
+        candidate = val if os.path.isabs(val) else os.path.join(base_dir, val)
+        if os.path.exists(_win_long_path(candidate)):
+            return candidate
+    if fallback_zip_path and fallback_zip_path.lower().endswith(".zip"):
+        fallback_dir = get_zip_extract_dir(fallback_zip_path)
+        if os.path.isdir(_win_long_path(fallback_dir)):
+            return fallback_dir
+    return None
+
+
+def _record_expanded_zip_path(expanded_zips, key, base_dir, dest_path):
+    """Persist the expanded file or directory path relative to the course directory when possible."""
+    if not dest_path:
+        return
+    try:
+        rel = os.path.relpath(dest_path, base_dir)
+        expanded_zips[key] = dest_path if rel.startswith("..") else rel
+    except ValueError:
+        expanded_zips[key] = dest_path
+
+
+def expand_zip_archive(zip_path, bb_ts=None, allow_overwrite=False, _depth=0, _budget=None):
     """
-    If EXPAND_ZIPS is enabled and zip_path is a .zip archive, extract it into
-    '<original_name>_zip' in the same directory and optionally delete the original .zip
-    when DELETE_ORIGINAL_ZIP is enabled. Returns the extracted folder path on success, or None.
+    Smartly expand a .zip archive when EXPAND_ZIPS is enabled.
+
+    Handles single-folder unwrapping, multi-level single-child chain collapsing,
+    preserving differently-named inner folders inside '<stem>_zip', keeping generic
+    single documents inside '<stem>_zip', unwrapping descriptive single documents,
+    skipping empty/encrypted/corrupt archives without deletion, recursive nested
+    zips (up to _ZIP_MAX_DEPTH), OS junk filtering, and zip-slip/zip-bomb guards.
+    Returns the final extracted file or folder path on success, or None.
     """
     if not EXPAND_ZIPS or not zip_path.lower().endswith(".zip") or not os.path.isfile(zip_path):
         return None
+    if _depth > _ZIP_MAX_DEPTH:
+        return None
+
+    budget = _budget if _budget is not None else {
+        "entries_used": 0,
+        "bytes_used": 0,
+        "max_entries": _ZIP_MAX_ENTRIES,
+        "max_bytes": _ZIP_MAX_BYTES,
+    }
+    parent_dir = os.path.dirname(os.path.abspath(zip_path)) or "."
+    zip_stem = os.path.splitext(os.path.basename(zip_path))[0]
     extract_dir = get_zip_extract_dir(zip_path)
+    staging_dir = None
+
     try:
-        os.makedirs(extract_dir, exist_ok=True)
-        real_root = os.path.realpath(extract_dir)
         with zipfile.ZipFile(zip_path, "r") as zf:
-            for member in zf.infolist():
-                member_dest = os.path.realpath(os.path.join(extract_dir, member.filename))
-                if member_dest != real_root and not member_dest.startswith(real_root + os.sep):
+            plan_kind, planned, _ = _inspect_zip_plan(zf, zip_stem, budget)
+            if plan_kind in ("empty", "encrypted", "bomb"):
+                if plan_kind == "bomb":
+                    sys.stderr.write(f"Skipped zip archive {os.path.basename(zip_path)}: size/entry limit exceeded\n")
+                return None
+
+            os.makedirs(_win_long_path(parent_dir), exist_ok=True)
+            staging_dir = tempfile.mkdtemp(prefix=".tmp_zip_", dir=parent_dir)
+            real_stage = os.path.realpath(staging_dir)
+
+            for member, rel_parts in planned:
+                budget["entries_used"] += 1
+                dest_path = os.path.realpath(os.path.join(staging_dir, *rel_parts))
+                if dest_path != real_stage and not dest_path.startswith(real_stage + os.sep):
                     continue
-                zf.extract(member, extract_dir)
+                os.makedirs(_win_long_path(os.path.dirname(dest_path)), exist_ok=True)
+                with zf.open(member, "r") as src, open(_win_long_path(dest_path), "wb") as dst:
+                    while True:
+                        chunk = src.read(65536)
+                        if not chunk:
+                            break
+                        budget["bytes_used"] += len(chunk)
+                        if budget["bytes_used"] > budget["max_bytes"]:
+                            raise ValueError("Archive uncompressed size exceeded safety budget")
+                        dst.write(chunk)
+                try:
+                    dt = member.date_time
+                    if dt and dt[0] >= 1980:
+                        ts = time.mktime((dt[0], dt[1], dt[2], dt[3], dt[4], dt[5], 0, 0, -1))
+                        os.utime(_win_long_path(dest_path), (ts, ts))
+                except Exception:
+                    pass
+
+        if _depth < _ZIP_MAX_DEPTH:
+            nested_zips = []
+            for root, _dirs, files in os.walk(staging_dir):
+                for fname in files:
+                    if fname.lower().endswith(".zip"):
+                        nested_zips.append(os.path.join(root, fname))
+            for nz in nested_zips:
+                expand_zip_archive(
+                    nz,
+                    bb_ts=bb_ts,
+                    allow_overwrite=True,
+                    _depth=_depth + 1,
+                    _budget=budget,
+                )
+
+        final_dest = extract_dir
+        if plan_kind == "single_doc":
+            doc_name = planned[0][1][0]
+            staged_doc = os.path.join(staging_dir, doc_name)
+            candidate_doc = os.path.join(parent_dir, doc_name)
+            if os.path.exists(_win_long_path(candidate_doc)):
+                if os.path.isfile(_win_long_path(candidate_doc)) and (
+                    allow_overwrite or _files_identical(staged_doc, candidate_doc)
+                ):
+                    os.replace(_win_long_path(staged_doc), _win_long_path(candidate_doc))
+                    final_dest = candidate_doc
+                else:
+                    # Do not overwrite an unrelated file; keep safely inside <stem>_zip
+                    _merge_tree_into(staging_dir, extract_dir)
+                    final_dest = extract_dir
+            else:
+                os.replace(_win_long_path(staged_doc), _win_long_path(candidate_doc))
+                final_dest = candidate_doc
+        else:
+            _merge_tree_into(staging_dir, extract_dir)
+            final_dest = extract_dir
+
         if bb_ts:
             try:
-                os.utime(extract_dir, (bb_ts, bb_ts))
+                os.utime(_win_long_path(final_dest), (bb_ts, bb_ts))
             except Exception:
                 pass
         if DELETE_ORIGINAL_ZIP:
             try:
-                os.remove(zip_path)
+                os.remove(_win_long_path(zip_path))
             except Exception:
                 pass
-        return extract_dir
-    except Exception as e:
+        return final_dest
+    except (zipfile.BadZipFile, RuntimeError, zlib.error, EOFError, OSError, ValueError) as e:
         sys.stderr.write(f"Error expanding zip archive {os.path.basename(zip_path)}: {e}\n")
         return None
+    finally:
+        if staging_dir and os.path.exists(_win_long_path(staging_dir)):
+            try:
+                _rmtree_readonly_safe(staging_dir)
+            except Exception:
+                pass
 
 
 def check_and_download_course_files(client, cid, info, state):
@@ -1327,6 +1703,7 @@ def check_and_download_course_files(client, cid, info, state):
     seen_requests_set = set(state.get("seen_requests", []))
     seen_links_set = set(state.get("seen_links", []))
     skipped_large = state.setdefault("skipped_large", {})
+    expanded_zips = state.setdefault("expanded_zips", {})
 
     cloud_link_re = re.compile(
         r'href=["\'](https?://(?:www\.)?(?:drive\.google\.com|docs\.google\.com|sharepoint\.com|1drv\.ms|onedrive\.live\.com|youtube\.com|youtu\.be|colab\.research\.google\.com|kaltura\.com|github\.com)[^\s"\'<>]+)["\']',
@@ -1361,7 +1738,11 @@ def check_and_download_course_files(client, cid, info, state):
                         pass
 
         target_path = os.path.join(target_dir, fname_clean)
-        zip_extract_dir = get_zip_extract_dir(target_path) if fname_lower.endswith(".zip") else None
+        recorded_zip_dest = (
+            _resolve_recorded_zip_path(expanded_zips, file_key, base_dir, fallback_zip_path=target_path)
+            if fname_lower.endswith(".zip")
+            else None
+        )
 
         # Revision Detection (Item 1)
         bb_ts = None
@@ -1372,7 +1753,7 @@ def check_and_download_course_files(client, cid, info, state):
                 pass
 
         is_revision = False
-        existing_check_path = target_path if os.path.exists(target_path) else (zip_extract_dir if (zip_extract_dir and os.path.isdir(zip_extract_dir)) else None)
+        existing_check_path = target_path if os.path.exists(target_path) else recorded_zip_dest
         if existing_check_path:
             local_ts = os.path.getmtime(existing_check_path)
             prev_mtime = seen_files_mtime.get(file_key)
@@ -1399,8 +1780,14 @@ def check_and_download_course_files(client, cid, info, state):
                     os.utime(target_path, (bb_ts, bb_ts))
                 except Exception:
                     pass
-            extracted_dir = expand_zip_archive(target_path, bb_ts=bb_ts)
-            final_saved_path = extracted_dir if (extracted_dir and DELETE_ORIGINAL_ZIP) else target_path
+            extracted_dest = expand_zip_archive(
+                target_path,
+                bb_ts=bb_ts,
+                allow_overwrite=is_revision or (recorded_zip_dest is not None),
+            )
+            if extracted_dest:
+                _record_expanded_zip_path(expanded_zips, file_key, base_dir, extracted_dest)
+            final_saved_path = extracted_dest if (extracted_dest and DELETE_ORIGINAL_ZIP) else target_path
             seen_files_set.add(file_key)
             if item_modified:
                 seen_files_mtime[file_key] = item_modified
@@ -1954,15 +2341,23 @@ def check_announcements(client, cid, info, state, new_requests=None):
                 )
 
             # Download all attached files into Announcements/
+            expanded_zips = state.setdefault("expanded_zips", {})
             for af in attached_files:
                 target_fname = sanitize_filename(af["filename"] or "attachment")
                 target_path = os.path.join(ann_dir, target_fname)
-                zip_ext_dir = get_zip_extract_dir(target_path) if target_fname.lower().endswith(".zip") else None
-                already_present = os.path.exists(target_path) or (zip_ext_dir and os.path.isdir(zip_ext_dir))
+                ann_zip_key = f"{cid}_ann_{ann_id}_{target_fname}"
+                recorded_ann_zip = (
+                    _resolve_recorded_zip_path(expanded_zips, ann_zip_key, base_dir, fallback_zip_path=target_path)
+                    if target_fname.lower().endswith(".zip")
+                    else None
+                )
+                already_present = os.path.exists(target_path) or (recorded_ann_zip is not None)
                 if not already_present:
                     try:
                         client.download_file(af["url"], target_path, max_bytes=MAX_FILE_BYTES)
-                        expand_zip_archive(target_path)
+                        extracted_dest = expand_zip_archive(target_path)
+                        if extracted_dest:
+                            _record_expanded_zip_path(expanded_zips, ann_zip_key, base_dir, extracted_dest)
                     except FileTooLargeError as big:
                         sys.stderr.write(f"Skipped announcement attachment {target_fname}: {big.size_bytes / 1048576:.1f} MB exceeds limit\n")
                     except Exception as e:
@@ -1999,6 +2394,7 @@ def check_announcements(client, cid, info, state, new_requests=None):
 
                 req_files = []
                 ann_dir_src = os.path.join(base_dir, "Announcements")
+                expanded_zips = state.setdefault("expanded_zips", {})
                 for af in attached_files:
                     af_fname = sanitize_filename(af.get("filename") or "attachment")
                     src_af = os.path.join(ann_dir_src, af_fname)
@@ -2008,14 +2404,23 @@ def check_announcements(client, cid, info, state, new_requests=None):
                             shutil.copy2(src_af, dst_af)
                         except Exception:
                             pass
-                    src_zip_dir = get_zip_extract_dir(src_af) if af_fname.lower().endswith(".zip") else None
-                    dst_zip_dir = get_zip_extract_dir(dst_af) if af_fname.lower().endswith(".zip") else None
-                    if src_zip_dir and os.path.isdir(src_zip_dir):
+                    ann_zip_key = f"{cid}_ann_{ann_id}_{af_fname}"
+                    src_expanded = (
+                        _resolve_recorded_zip_path(expanded_zips, ann_zip_key, base_dir, fallback_zip_path=src_af)
+                        if af_fname.lower().endswith(".zip")
+                        else None
+                    )
+                    dst_expanded = None
+                    if src_expanded:
+                        dst_expanded = os.path.join(req_dir, os.path.basename(src_expanded))
                         try:
-                            shutil.copytree(src_zip_dir, dst_zip_dir, dirs_exist_ok=True)
+                            if os.path.isdir(src_expanded):
+                                shutil.copytree(src_expanded, dst_expanded, dirs_exist_ok=True)
+                            elif os.path.isfile(src_expanded):
+                                shutil.copy2(src_expanded, dst_expanded)
                         except Exception:
-                            pass
-                    rec_af_name = os.path.basename(dst_zip_dir) if (dst_zip_dir and os.path.isdir(dst_zip_dir) and not os.path.exists(dst_af)) else af_fname
+                            dst_expanded = None
+                    rec_af_name = os.path.basename(dst_expanded) if (dst_expanded and os.path.exists(dst_expanded) and not os.path.exists(dst_af)) else af_fname
                     if rec_af_name not in req_files:
                         req_files.append(rec_af_name)
 
@@ -2187,7 +2592,7 @@ def check_grades(client, state, courses_map=None, student_user_id=None):
 
 
 _COURSE_LIST_KEYS = ("seen_files", "seen_requests", "seen_links", "seen_announcements")
-_COURSE_DICT_KEYS = ("seen_files_mtime", "skipped_large")
+_COURSE_DICT_KEYS = ("seen_files_mtime", "skipped_large", "expanded_zips")
 
 
 def _sync_course(client, cid, info, state):

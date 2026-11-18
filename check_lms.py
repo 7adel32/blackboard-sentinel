@@ -138,7 +138,7 @@ def init_config(override=False):
         if os.path.isfile(c):
             load_env_file(c, override=override, _seen_keys=seen_keys)
 
-    global LMS_URL, USER_ID, PASSWORD, STUDENT_USER_ID, LMS_STORAGE_DIR, LMS_COURSES, TRAY_THEME, STATE_DIR, STATE_FILE, LOGS_DIR, KEEP_ALL_ANNOUNCEMENTS, EXPAND_ZIPS, DELETE_ORIGINAL_ZIP, MAX_FILE_BYTES, MAX_WORKERS
+    global LMS_URL, USER_ID, PASSWORD, STUDENT_USER_ID, LMS_STORAGE_DIR, LMS_COURSES, TRAY_THEME, STATE_DIR, STATE_FILE, LOGS_DIR, KEEP_ALL_ANNOUNCEMENTS, DOWNLOAD_MESSAGES, EXPAND_ZIPS, DELETE_ORIGINAL_ZIP, MAX_FILE_BYTES, MAX_WORKERS
 
     LMS_URL = os.getenv("LMS_URL", "").rstrip("/")
     USER_ID = os.getenv("LMS_USER_ID", "")
@@ -160,6 +160,11 @@ def init_config(override=False):
     LMS_COURSES = os.getenv("LMS_COURSES", "")
     TRAY_THEME = os.getenv("TRAY_THEME", "auto")
     KEEP_ALL_ANNOUNCEMENTS = os.getenv("LMS_KEEP_ALL_ANNOUNCEMENTS", "false").lower() in ("true", "1", "yes")
+    DOWNLOAD_MESSAGES = (
+        os.getenv("LMS_DOWNLOAD_MESSAGES")
+        or os.getenv("DOWNLOAD_MESSAGES")
+        or "false"
+    ).strip().lower() in ("true", "1", "yes")
     EXPAND_ZIPS = os.getenv("LMS_EXPAND_ZIPS", "false").lower() in ("true", "1", "yes")
     DELETE_ORIGINAL_ZIP = os.getenv("LMS_DELETE_ORIGINAL_ZIP", "false").lower() in ("true", "1", "yes")
 
@@ -549,8 +554,8 @@ def fetch_all_available_courses(client):
             clean_name = re.sub(r'[/\\?%*:|"<>]', ' ', raw_name)
             clean_name = re.sub(r'\s+', ' ', clean_name).strip()
 
-            code_m = re.search(r'([0-9]{3}\s+[A-Za-z]+|[A-Za-z]+\s+[0-9]{3})', clean_name)
-            code = code_m.group(0) if code_m else ""
+            code_m = re.search(r'([0-9]{3}\s+[A-Za-z]{2,6})', clean_name) or re.search(r'\b([A-Za-z]{2,6}\s+[0-9]{3})\b', clean_name)
+            code = code_m.group(1) if code_m else ""
 
             created_raw = cinfo.get("created") or enrollment.get("created") or cinfo.get("modified") or ""
             date_display = ""
@@ -592,29 +597,20 @@ CANONICAL_COURSE_MAP = {
 
 def get_courses_map(client):
     """Dynamically discover enrolled courses from Blackboard, filtered by LMS_COURSES if configured.
-    Maps courses to user's canonical folders (e.g. 'AI FUNDAMENTALS') if present, falling back to LMS_STORAGE_DIR."""
+    Stores courses under LMS_STORAGE_DIR (unless LMS_DOCUMENTS_DIR is explicitly set)."""
     courses_map = {}
     allowed_ids = set()
     courses_cfg = os.getenv("LMS_COURSES", "").strip()
     if courses_cfg:
         allowed_ids = set(x.strip() for x in courses_cfg.split(",") if x.strip())
 
-    default_storage = os.path.normpath(os.path.expanduser("~/Documents/University"))
-    configured_storage = os.path.normpath(os.path.abspath(LMS_STORAGE_DIR)) if LMS_STORAGE_DIR else ""
-    storage_is_custom = bool(configured_storage and configured_storage != default_storage)
-
-    # Detect user's main Documents folder where canonical course folders live (only for default storage)
-    if storage_is_custom:
-        doc_candidates = [os.getenv("LMS_DOCUMENTS_DIR", ""), configured_storage]
-    else:
-        doc_candidates = [
-            os.getenv("LMS_DOCUMENTS_DIR", ""),
-            "/mnt/c/Users/Percent/Documents",
-            r"C:\Users\Percent\Documents",
-            os.path.expanduser("~/Documents"),
-            os.path.abspath(os.path.join(LMS_STORAGE_DIR, "..")) if LMS_STORAGE_DIR else ""
-        ]
-    canonical_root = next((d for d in doc_candidates if d and os.path.isdir(os.path.join(d, "AI FUNDAMENTALS"))), None)
+    storage_root = LMS_STORAGE_DIR or os.path.normpath(os.path.expanduser("~/Documents/University"))
+    explicit_docs_dir = os.getenv("LMS_DOCUMENTS_DIR", "").strip()
+    canonical_root = (
+        os.path.normpath(os.path.expanduser(explicit_docs_dir))
+        if explicit_docs_dir and os.path.isdir(os.path.join(os.path.expanduser(explicit_docs_dir), "AI FUNDAMENTALS"))
+        else None
+    )
 
     try:
         user_courses = client.get_paginated_json("/learn/api/public/v1/users/me/courses")
@@ -628,18 +624,18 @@ def get_courses_map(client):
             cinfo = client.get_json(f"/learn/api/public/v3/courses/{cid}") or {}
             raw_name = cinfo.get("name") or cinfo.get("courseId") or cid
             clean_name = re.sub(r'[/\\?%*:|"<>]', ' ', raw_name)
-            clean_name = re.sub(r'\s+', ' ', clean_name).strip()
-            
-            code_m = re.search(r'([0-9]{3}\s+[A-Za-z]+|[A-Za-z]+\s+[0-9]{3})', clean_name)
-            code = code_m.group(0) if code_m else ""
+            clean_name = re.sub(r'\s+', ' ', clean_name).strip().rstrip('. ')
 
-            # Check if canonical mapping exists
+            code_m = re.search(r'([0-9]{3}\s+[A-Za-z]{2,6})', clean_name) or re.search(r'\b([A-Za-z]{2,6}\s+[0-9]{3})\b', clean_name)
+            code = code_m.group(1) if code_m else ""
+
+            # Only route to canonical folder names when LMS_DOCUMENTS_DIR is explicitly configured
             canonical = CANONICAL_COURSE_MAP.get(code)
             if canonical and canonical_root and os.path.isdir(os.path.join(canonical_root, canonical["folder"])):
                 target_dir = os.path.join(canonical_root, canonical["folder"])
                 doctor = canonical.get("doctor", "")
             else:
-                target_dir = os.path.join(LMS_STORAGE_DIR, clean_name)
+                target_dir = os.path.join(storage_root, clean_name)
                 doctor = canonical.get("doctor", "") if canonical else ""
 
             courses_map[cid] = {
@@ -770,6 +766,7 @@ def load_state():
         "seen_requests": [],
         "alerted_deadlines": {},
         "seen_announcements": [],
+        "seen_messages": [],
         "seen_grades": {},
         "seen_links": [],
         "expanded_zips": {}
@@ -1057,15 +1054,17 @@ class LMSClient:
     def download_file(self, path_or_url, dest_path, max_bytes=0, timeout=60):
         url = path_or_url if path_or_url.startswith("http") else f"{LMS_URL}{path_or_url}"
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        os.makedirs(_win_long_path(os.path.dirname(dest_path)), exist_ok=True)
         tmp_dest = dest_path + ".part"
+        lp_tmp = _win_long_path(tmp_dest)
+        lp_dest = _win_long_path(dest_path)
         with self.opener.open(req, timeout=timeout) as resp:
             cl = resp.headers.get("Content-Length")
             expected_bytes = int(cl) if cl and cl.isdigit() else None
             if max_bytes and expected_bytes is not None and expected_bytes > max_bytes:
                 raise FileTooLargeError(expected_bytes)
             downloaded = 0
-            with open(tmp_dest, "wb") as f:
+            with open(lp_tmp, "wb") as f:
                 while True:
                     chunk = resp.read(65536)
                     if not chunk:
@@ -1078,20 +1077,20 @@ class LMSClient:
         if max_bytes and downloaded > max_bytes:
             # Size was not advertised up front; abort once the cap is exceeded.
             try:
-                os.remove(tmp_dest)
+                os.remove(lp_tmp)
             except Exception:
                 pass
             raise FileTooLargeError(downloaded)
 
         if expected_bytes is not None and downloaded != expected_bytes:
-            if os.path.exists(tmp_dest):
+            if os.path.exists(lp_tmp):
                 try:
-                    os.remove(tmp_dest)
+                    os.remove(lp_tmp)
                 except Exception:
                     pass
             raise IOError(f"Incomplete download for {dest_path}: got {downloaded} bytes, expected {expected_bytes}")
 
-        os.replace(tmp_dest, dest_path)
+        os.replace(lp_tmp, lp_dest)
 
 
 def clean_html(text):
@@ -1143,8 +1142,8 @@ def sanitize_filename(fn):
         return ""
     # Strip invisible RTL / LTR formatting characters
     fn = re.sub(r'[\u200e\u200f\u202a-\u202e]', '', fn).strip()
-    # Strip dangerous characters for Windows NTFS
-    return re.sub(r'[\\/*?:"<>|]', '_', fn)
+    # Strip dangerous characters and trailing dots/spaces (silently stripped on Windows NTFS)
+    return re.sub(r'[\\/*?:"<>|]', '_', fn).rstrip('. ')
 
 
 REQUEST_KEYWORDS = [
@@ -1546,12 +1545,22 @@ def get_zip_extract_dir(zip_path):
     return os.path.join(parent, f"{base}_zip")
 
 
+def _is_within_dir(path, root_dir):
+    """Return True if path resides inside root_dir (or equals it)."""
+    try:
+        norm_root = os.path.normcase(os.path.abspath(root_dir))
+        norm_path = os.path.normcase(os.path.abspath(path))
+        return os.path.commonpath([norm_root, norm_path]) == norm_root
+    except ValueError:
+        return False
+
+
 def _resolve_recorded_zip_path(expanded_zips, key, base_dir, fallback_zip_path=None):
-    """Resolve a previously expanded zip target (file or directory) if it still exists on disk."""
+    """Resolve a previously expanded zip target (file or directory) inside base_dir if it still exists on disk."""
     val = expanded_zips.get(key) if expanded_zips else None
     if val:
         candidate = val if os.path.isabs(val) else os.path.join(base_dir, val)
-        if os.path.exists(_win_long_path(candidate)):
+        if _is_within_dir(candidate, base_dir) and os.path.exists(_win_long_path(candidate)):
             return candidate
     if fallback_zip_path and fallback_zip_path.lower().endswith(".zip"):
         fallback_dir = get_zip_extract_dir(fallback_zip_path)
@@ -1753,9 +1762,9 @@ def check_and_download_course_files(client, cid, info, state):
                 pass
 
         is_revision = False
-        existing_check_path = target_path if os.path.exists(target_path) else recorded_zip_dest
+        existing_check_path = target_path if os.path.exists(_win_long_path(target_path)) else recorded_zip_dest
         if existing_check_path:
-            local_ts = os.path.getmtime(existing_check_path)
+            local_ts = os.path.getmtime(_win_long_path(existing_check_path))
             prev_mtime = seen_files_mtime.get(file_key)
             if bb_ts and local_ts and (bb_ts > local_ts + 60 or (prev_mtime and item_modified != prev_mtime)):
                 is_revision = True
@@ -1777,7 +1786,7 @@ def check_and_download_course_files(client, cid, info, state):
             skipped_large.pop(file_key, None)
             if bb_ts:
                 try:
-                    os.utime(target_path, (bb_ts, bb_ts))
+                    os.utime(_win_long_path(target_path), (bb_ts, bb_ts))
                 except Exception:
                     pass
             extracted_dest = expand_zip_archive(
@@ -1911,28 +1920,32 @@ def check_and_download_course_files(client, cid, info, state):
 
             for l_title, l_url in found_links:
                 link_key = f"{cid}_{item_id}_{l_url}"
-                if link_key not in seen_links_set:
+                clean_lt = sanitize_filename(l_title or "External Resource")
+                if current_req is not None:
+                    t_dir = current_req["req_dir"]
+                elif current_rel_dir:
+                    t_dir = os.path.join(base_dir, current_rel_dir)
+                else:
+                    t_dir = os.path.join(base_dir, "Announcements")
+                ext = ".webloc" if sys.platform == "darwin" else ".url"
+                expected_sc_path = os.path.join(t_dir, f"{clean_lt or 'External Link'}{ext}")
+                is_new_link = link_key not in seen_links_set
+                if is_new_link or not os.path.exists(_win_long_path(expected_sc_path)):
                     seen_links_set.add(link_key)
-                    clean_lt = sanitize_filename(l_title or "External Resource")
-                    if current_req is not None:
-                        t_dir = current_req["req_dir"]
-                    elif current_rel_dir:
-                        t_dir = os.path.join(base_dir, current_rel_dir)
-                    else:
-                        t_dir = os.path.join(base_dir, "Announcements")
                     try:
                         sc_path = _write_web_shortcut(t_dir, clean_lt, l_url)
-                        try:
-                            rel_sc = os.path.relpath(sc_path, LMS_STORAGE_DIR)
-                        except ValueError:
-                            rel_sc = sc_path
-                        external_links.append({
-                            "course": f"{info['name']} ({info['code']})",
-                            "doctor": info["doctor"],
-                            "title": l_title,
-                            "url": l_url,
-                            "saved": rel_sc
-                        })
+                        if is_new_link:
+                            try:
+                                rel_sc = os.path.relpath(sc_path, LMS_STORAGE_DIR)
+                            except ValueError:
+                                rel_sc = sc_path
+                            external_links.append({
+                                "course": f"{info['name']} ({info['code']})",
+                                "doctor": info["doctor"],
+                                "title": l_title,
+                                "url": l_url,
+                                "saved": rel_sc
+                            })
                     except Exception:
                         pass
 
@@ -1945,17 +1958,17 @@ def check_and_download_course_files(client, cid, info, state):
 
             if started_new_req_scope and current_req is not None:
                 seen_requests_set.add(current_req["req_key"])
-                if current_req["is_new"]:
-                    os.makedirs(current_req["req_dir"], exist_ok=True)
-                    for existing_fn in os.listdir(current_req["req_dir"]):
+                inst_md_path = os.path.join(current_req["req_dir"], "blackboard_instructions.md")
+                if current_req["is_new"] or not os.path.exists(_win_long_path(inst_md_path)):
+                    os.makedirs(_win_long_path(current_req["req_dir"]), exist_ok=True)
+                    for existing_fn in os.listdir(_win_long_path(current_req["req_dir"])):
                         if existing_fn != "blackboard_instructions.md" and existing_fn not in current_req["files"]:
                             current_req["files"].append(existing_fn)
 
                     instructions_text = "\n\n".join(current_req["instructions_parts"]).strip()
                     current_req["instructions_text"] = instructions_text
 
-                    inst_md_path = os.path.join(current_req["req_dir"], "blackboard_instructions.md")
-                    with open(inst_md_path, "w", encoding="utf-8") as f:
+                    with open(_win_long_path(inst_md_path), "w", encoding="utf-8") as f:
                         f.write(f"# {current_req['raw_title']}\n\n")
                         f.write(f"- **Course**: {current_req['course_name']} ({current_req['course_code']})\n")
                         f.write(f"- **Instructor**: {current_req['doctor']}\n")
@@ -1966,7 +1979,8 @@ def check_and_download_course_files(client, cid, info, state):
                         f.write("\n## Blackboard Instructions\n\n")
                         f.write(instructions_text if instructions_text else "*(No text instructions provided in Blackboard body; refer to the downloaded files in this folder.)*\n")
 
-                    new_requests.append(current_req)
+                    if current_req["is_new"]:
+                        new_requests.append(current_req)
 
     traverse_contents()
     state["seen_files"] = list(seen_files_set)
@@ -2379,16 +2393,18 @@ def check_announcements(client, cid, info, state, new_requests=None):
         if is_request_announcement(raw_title, body_clean, attached_files):
             req_key = f"ann_{cid}_{ann_id}"
             seen_requests_set = set(state.get("seen_requests", []))
-            if req_key not in seen_requests_set:
-                req_folder_name = get_request_folder_name(raw_title)
-                req_dir = os.path.join(base_dir, req_folder_name)
-                os.makedirs(req_dir, exist_ok=True)
+            req_folder_name = get_request_folder_name(raw_title)
+            req_dir = os.path.join(base_dir, req_folder_name)
+            inst_md_path = os.path.join(req_dir, "blackboard_instructions.md")
+            is_new_ann_req = req_key not in seen_requests_set
+            if is_new_ann_req or not os.path.exists(_win_long_path(inst_md_path)):
+                os.makedirs(_win_long_path(req_dir), exist_ok=True)
 
                 import shutil
                 doc_path_src = os.path.join(base_dir, "Announcements", f"{clean_title}.docx")
-                if os.path.exists(doc_path_src):
+                if os.path.exists(_win_long_path(doc_path_src)):
                     try:
-                        shutil.copy2(doc_path_src, os.path.join(req_dir, f"{clean_title}.docx"))
+                        shutil.copy2(_win_long_path(doc_path_src), _win_long_path(os.path.join(req_dir, f"{clean_title}.docx")))
                     except Exception:
                         pass
 
@@ -2399,9 +2415,9 @@ def check_announcements(client, cid, info, state, new_requests=None):
                     af_fname = sanitize_filename(af.get("filename") or "attachment")
                     src_af = os.path.join(ann_dir_src, af_fname)
                     dst_af = os.path.join(req_dir, af_fname)
-                    if os.path.exists(src_af):
+                    if os.path.exists(_win_long_path(src_af)):
                         try:
-                            shutil.copy2(src_af, dst_af)
+                            shutil.copy2(_win_long_path(src_af), _win_long_path(dst_af))
                         except Exception:
                             pass
                     ann_zip_key = f"{cid}_ann_{ann_id}_{af_fname}"
@@ -2414,22 +2430,21 @@ def check_announcements(client, cid, info, state, new_requests=None):
                     if src_expanded:
                         dst_expanded = os.path.join(req_dir, os.path.basename(src_expanded))
                         try:
-                            if os.path.isdir(src_expanded):
-                                shutil.copytree(src_expanded, dst_expanded, dirs_exist_ok=True)
-                            elif os.path.isfile(src_expanded):
-                                shutil.copy2(src_expanded, dst_expanded)
+                            if os.path.isdir(_win_long_path(src_expanded)):
+                                shutil.copytree(_win_long_path(src_expanded), _win_long_path(dst_expanded), dirs_exist_ok=True)
+                            elif os.path.isfile(_win_long_path(src_expanded)):
+                                shutil.copy2(_win_long_path(src_expanded), _win_long_path(dst_expanded))
                         except Exception:
                             dst_expanded = None
-                    rec_af_name = os.path.basename(dst_expanded) if (dst_expanded and os.path.exists(dst_expanded) and not os.path.exists(dst_af)) else af_fname
+                    rec_af_name = os.path.basename(dst_expanded) if (dst_expanded and os.path.exists(_win_long_path(dst_expanded)) and not os.path.exists(_win_long_path(dst_af))) else af_fname
                     if rec_af_name not in req_files:
                         req_files.append(rec_af_name)
 
                 doc_fname = f"{clean_title}.docx"
-                if doc_fname not in req_files and os.path.exists(os.path.join(req_dir, doc_fname)):
+                if doc_fname not in req_files and os.path.exists(_win_long_path(os.path.join(req_dir, doc_fname))):
                     req_files.insert(0, doc_fname)
 
-                inst_md_path = os.path.join(req_dir, "blackboard_instructions.md")
-                with open(inst_md_path, "w", encoding="utf-8") as f:
+                with open(_win_long_path(inst_md_path), "w", encoding="utf-8") as f:
                     f.write(f"# {raw_title}\n\n")
                     f.write(f"- **Course**: {info['name']} ({info['code']})\n")
                     f.write(f"- **Instructor**: {info['doctor']}\n")
@@ -2444,26 +2459,27 @@ def check_announcements(client, cid, info, state, new_requests=None):
                 seen_requests_set.add(req_key)
                 state["seen_requests"] = list(seen_requests_set)
 
-                ann_req = {
-                    "req_key": req_key,
-                    "cid": cid,
-                    "item_id": ann_id,
-                    "course_name": info["name"],
-                    "course_code": info["code"],
-                    "doctor": info["doctor"],
-                    "raw_title": re.sub(r'[\u200e\u200f\u202a-\u202e]', "", raw_title).strip(),
-                    "req_folder_name": req_folder_name,
-                    "req_dir": req_dir,
-                    "created": created_raw,
-                    "is_new": True,
-                    "instructions_parts": [body_clean] if body_clean else [],
-                    "instructions_text": body_clean,
-                    "files": req_files,
-                    "llm_dir": os.path.join(req_dir, "Solution"),
-                    "source_type": "announcement"
-                }
-                if new_requests is not None:
-                    new_requests.append(ann_req)
+                if is_new_ann_req:
+                    ann_req = {
+                        "req_key": req_key,
+                        "cid": cid,
+                        "item_id": ann_id,
+                        "course_name": info["name"],
+                        "course_code": info["code"],
+                        "doctor": info["doctor"],
+                        "raw_title": re.sub(r'[\u200e\u200f\u202a-\u202e]', "", raw_title).strip(),
+                        "req_folder_name": req_folder_name,
+                        "req_dir": req_dir,
+                        "created": created_raw,
+                        "is_new": True,
+                        "instructions_parts": [body_clean] if body_clean else [],
+                        "instructions_text": body_clean,
+                        "files": req_files,
+                        "llm_dir": os.path.join(req_dir, "Solution"),
+                        "source_type": "announcement"
+                    }
+                    if new_requests is not None:
+                        new_requests.append(ann_req)
 
         if not ann_id or ann_id in seen:
             continue
@@ -2591,7 +2607,606 @@ def check_grades(client, state, courses_map=None, student_user_id=None):
     return grade_alerts
 
 
-_COURSE_LIST_KEYS = ("seen_files", "seen_requests", "seen_links", "seen_announcements")
+_LECTURER_ROLES = {"instructor", "teachingassistant", "coursebuilder", "grader", "faculty", "p", "t"}
+
+
+def _format_bb_user_name(user_obj):
+    """Build a readable display name from a Blackboard user or sender dictionary."""
+    if not isinstance(user_obj, dict):
+        return str(user_obj or "").strip()
+    name_obj = user_obj.get("name") if isinstance(user_obj.get("name"), dict) else user_obj
+    parts = [
+        (name_obj.get("given") or name_obj.get("givenName") or "").strip(),
+        (name_obj.get("middle") or name_obj.get("middleName") or "").strip(),
+        (name_obj.get("family") or name_obj.get("familyName") or "").strip(),
+    ]
+    full = " ".join(p for p in parts if p)
+    if full:
+        return re.sub(r"\s+", " ", full).strip()
+    return (user_obj.get("displayName") or user_obj.get("userName") or user_obj.get("id") or "").strip()
+
+
+def _normalize_person_name(name):
+    """Normalize honorifics and punctuation for fuzzy lecturer name matching."""
+    s = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", name or "").strip().lower()
+    s = re.sub(r"\b(?:dr|prof|mr|ms|mrs|د)\b\.?", " ", s)
+    s = re.sub(r"[^\w\u0600-\u06ff]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _format_msg_date(raw_date):
+    if not raw_date:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00")).astimezone(AST_TZ)
+        return dt.strftime("%A, %b %d at %I:%M %p")
+    except Exception:
+        return str(raw_date)
+
+
+def _sanitize_html_fragment(raw_html):
+    """Remove scripts, styles, and inline event handlers while keeping readable formatting."""
+    if not raw_html:
+        return ""
+    frag = re.sub(r"(?is)<(script|style|iframe|object|embed)\b[^>]*>.*?</\1>", "", str(raw_html))
+    frag = re.sub(r'(?is)\son[a-z]+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)', "", frag)
+    frag = re.sub(r'(?is)href\s*=\s*(["\'])\s*javascript:[^"\']*\1', 'href="#"', frag)
+    return frag.strip()
+
+
+def _extract_message_attachments(msg_obj, body_html):
+    """Extract attachment filenames from message metadata or embedded HTML without downloading files."""
+    names = []
+    seen = set()
+
+    def _add(name):
+        cleaned = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", (name or "")).strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            names.append(cleaned)
+
+    raw_atts = msg_obj.get("attachments") or msg_obj.get("attachment") or []
+    if isinstance(raw_atts, dict):
+        raw_atts = [raw_atts]
+    if isinstance(raw_atts, list):
+        for att in raw_atts:
+            if isinstance(att, dict):
+                _add(att.get("fileName") or att.get("displayName") or att.get("name") or att.get("title"))
+            elif isinstance(att, str):
+                _add(att)
+
+    if body_html:
+        for bf in re.findall(r'data-bbfile=[\x27"]([^\x27"]+)[\x27"]', body_html, re.IGNORECASE):
+            try:
+                obj = json.loads(html.unescape(urllib.parse.unquote(bf)))
+                _add(obj.get("fileName") or obj.get("displayName") or obj.get("linkName"))
+            except Exception:
+                pass
+        media_atts, _ = parse_announcement_media(body_html)
+        for ma in media_atts:
+            _add(ma.get("filename"))
+
+    return names
+
+
+def _fetch_course_instructors(client, cid, info):
+    """Collect instructor user IDs and normalized names for a course."""
+    instructor_ids = set()
+    instructor_names = set()
+
+    doc_norm = _normalize_person_name(info.get("doctor", ""))
+    if doc_norm:
+        instructor_names.add(doc_norm)
+
+    users_data = client.get_paginated_json(f"/learn/api/public/v1/courses/{cid}/users?expand=user")
+    for entry in (users_data or {}).get("results", []):
+        role = str(entry.get("courseRoleId") or "").strip().lower()
+        if role in _LECTURER_ROLES:
+            uid = entry.get("userId") or (entry.get("user") or {}).get("id")
+            if uid:
+                instructor_ids.add(str(uid))
+            disp = _normalize_person_name(_format_bb_user_name(entry.get("user") or entry))
+            if disp:
+                instructor_names.add(disp)
+
+    return instructor_ids, instructor_names
+
+
+def _is_lecturer_participant(user_id, display_name, instructor_ids, instructor_names):
+    if user_id and str(user_id) in instructor_ids:
+        return True
+    norm = _normalize_person_name(display_name)
+    if not norm:
+        return False
+    for known in instructor_names:
+        if norm == known or (len(known) >= 4 and (known in norm or norm in known)):
+            return True
+    return False
+
+
+def _derive_thread_subject(raw_subject, messages, conv_id, doctor_name):
+    subj = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", (raw_subject or "")).strip()
+    subj = re.sub(r"^(?:re|fwd|fw|رد)\s*:\s*", "", subj, flags=re.IGNORECASE).strip()
+    if subj:
+        return subj
+    for m in messages:
+        snippet = re.sub(r"\s+", " ", m.get("body_text") or "").strip()
+        if snippet:
+            words = snippet.split()
+            short = " ".join(words[:7])
+            if len(words) > 7 or len(short) > 55:
+                short = short[:52].rstrip() + "..."
+            return short
+    return f"Messages with {doctor_name}" if doctor_name else f"Conversation {conv_id}"
+
+
+def fetch_course_message_threads(client, cid, info):
+    """Fetch and normalize course message threads (Ultra conversations + Classic REST fallback)."""
+    instructor_ids, instructor_names = _fetch_course_instructors(client, cid, info)
+    has_role_metadata = bool(instructor_ids or instructor_names)
+    my_uid = str(getattr(client, "student_user_id", "") or STUDENT_USER_ID or "")
+
+    raw_threads = []
+
+    # 1. Blackboard Learn Ultra conversations API
+    conv_data = client.get_paginated_json(f"/learn/api/v1/courses/{cid}/conversations")
+    if isinstance(conv_data, dict) and "results" in conv_data:
+        for conv in conv_data.get("results") or []:
+            conv_id = str(conv.get("id") or "")
+            if not conv_id:
+                continue
+            detail = client.get_paginated_json(f"/learn/api/v1/courses/{cid}/conversations/{conv_id}/messages")
+            raw_msgs = (detail or {}).get("results") if isinstance(detail, dict) and "results" in detail else None
+            if raw_msgs is None:
+                raw_msgs = conv.get("messages") or []
+            participant_ids = [str(p) for p in (conv.get("participantIds") or []) if p]
+            if conv.get("creatorId"):
+                participant_ids.append(str(conv["creatorId"]))
+            raw_threads.append({
+                "thread_id": conv_id,
+                "subject": conv.get("subject") or conv.get("title") or "",
+                "updated": conv.get("updatedDate") or conv.get("createdDate") or "",
+                "participant_ids": participant_ids,
+                "raw_messages": raw_msgs,
+            })
+    else:
+        # 2. Classic Blackboard Course Messages REST API fallback
+        classic_msgs = []
+        seen_classic_ids = set()
+        for ep in (
+            f"/learn/api/public/v1/courses/{cid}/messages",
+            f"/learn/api/public/v1/courses/{cid}/messages?folderType=Inbox",
+            f"/learn/api/public/v1/courses/{cid}/messages?folderType=Sent",
+        ):
+            data = client.get_paginated_json(ep)
+            if isinstance(data, dict) and "results" in data:
+                for m in data.get("results") or []:
+                    mid = str(m.get("id") or "")
+                    if mid and mid not in seen_classic_ids:
+                        seen_classic_ids.add(mid)
+                        classic_msgs.append(m)
+
+        grouped = {}
+        for m in classic_msgs:
+            subj = m.get("subject") or "Course Message"
+            norm_subj = re.sub(r"^(?:re|fwd|fw|رد)\s*:\s*", "", subj, flags=re.IGNORECASE).strip() or "Course Message"
+            tid = str(m.get("threadId") or m.get("parentMessageId") or norm_subj.lower())
+            bucket = grouped.setdefault(tid, {
+                "thread_id": tid,
+                "subject": norm_subj,
+                "updated": m.get("postedDate") or m.get("created") or "",
+                "participant_ids": [],
+                "raw_messages": [],
+            })
+            bucket["raw_messages"].append(m)
+            ts = m.get("postedDate") or m.get("created") or ""
+            if ts > bucket["updated"]:
+                bucket["updated"] = ts
+        raw_threads.extend(grouped.values())
+
+    normalized_threads = []
+    for rt in raw_threads:
+        msgs = []
+        involves_lecturer = any(pid in instructor_ids for pid in rt["participant_ids"])
+        for rm in rt["raw_messages"]:
+            mid = str(rm.get("id") or "")
+            if not mid:
+                continue
+            sender_obj = rm.get("sender") if isinstance(rm.get("sender"), dict) else {}
+            sender_id = str(rm.get("senderId") or sender_obj.get("id") or "")
+            sender_name = _format_bb_user_name(sender_obj) or (
+                info.get("doctor", "") if sender_id in instructor_ids else ("You" if my_uid and sender_id == my_uid else "Participant")
+            )
+            is_lect_sender = _is_lecturer_participant(sender_id, sender_name, instructor_ids, instructor_names)
+            if is_lect_sender:
+                involves_lecturer = True
+                sender_role = "lecturer"
+            elif my_uid and sender_id == my_uid:
+                sender_role = "student"
+            else:
+                sender_role = "participant"
+
+            body_obj = rm.get("body")
+            if isinstance(body_obj, dict):
+                raw_body_html = body_obj.get("displayText") or body_obj.get("rawText") or ""
+            else:
+                raw_body_html = str(body_obj or "")
+
+            safe_html = _sanitize_html_fragment(raw_body_html)
+            body_text = extract_structured_text(raw_body_html) or clean_html(raw_body_html)
+            created_raw = str(rm.get("postDate") or rm.get("postedDate") or rm.get("created") or "")
+            attachments = _extract_message_attachments(rm, raw_body_html)
+
+            msgs.append({
+                "id": mid,
+                "thread_id": rt["thread_id"],
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "sender_role": sender_role,
+                "created": created_raw,
+                "formatted_date": _format_msg_date(created_raw),
+                "body_html": safe_html,
+                "body_text": body_text,
+                "attachments": attachments,
+            })
+
+        if not msgs:
+            continue
+
+        # Sort chronologically inside each conversation
+        msgs.sort(key=lambda m: (m["created"], m["id"]))
+        subject = _derive_thread_subject(rt["subject"], msgs, rt["thread_id"], info.get("doctor", ""))
+        for m in msgs:
+            m["subject"] = subject
+
+        normalized_threads.append({
+            "thread_id": rt["thread_id"],
+            "subject": subject,
+            "updated": msgs[-1]["created"] or rt["updated"],
+            "formatted_updated": msgs[-1]["formatted_date"] or _format_msg_date(rt["updated"]),
+            "involves_lecturer": involves_lecturer,
+            "messages": msgs,
+        })
+
+    if has_role_metadata and any(t["involves_lecturer"] for t in normalized_threads):
+        normalized_threads = [t for t in normalized_threads if t["involves_lecturer"]]
+    elif has_role_metadata:
+        # Filter out clearly student-only threads when instructor role/name metadata exists
+        filtered = []
+        for t in normalized_threads:
+            all_known_non_lecturer = all(
+                m["sender_role"] == "student" or (m["sender_id"] and not _is_lecturer_participant(m["sender_id"], m["sender_name"], instructor_ids, instructor_names))
+                for m in t["messages"]
+            )
+            if not all_known_non_lecturer:
+                filtered.append(t)
+        normalized_threads = filtered
+
+    # Newest conversations first
+    normalized_threads.sort(key=lambda t: t["updated"], reverse=True)
+
+    # Assign unique, readable filenames inside messages/
+    used_names = set()
+    for t in normalized_threads:
+        base_stem = sanitize_filename(t["subject"]) or "Conversation"
+        if len(base_stem) > 70:
+            base_stem = base_stem[:70].rstrip(". ")
+        candidate = f"{base_stem}.html"
+        if candidate.lower() in used_names:
+            short_id = sanitize_filename(t["thread_id"])[:20] or str(len(used_names) + 1)
+            candidate = f"{base_stem}_{short_id}.html"
+        used_names.add(candidate.lower())
+        t["filename"] = candidate
+
+    return normalized_threads
+
+
+_MESSAGES_HTML_CSS = """
+:root {
+  --bg: #f8fafc;
+  --card: #ffffff;
+  --text: #0f172a;
+  --muted: #64748b;
+  --border: #e2e8f0;
+  --lecturer-bg: #eff6ff;
+  --lecturer-border: #3b82f6;
+  --student-bg: #f1f5f9;
+  --student-border: #94a3b8;
+  --badge-bg: #e2e8f0;
+  --accent: #2563eb;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 24px 16px 48px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Arabic", Arial, sans-serif;
+  line-height: 1.6;
+}
+.container { max-width: 860px; margin: 0 auto; }
+.header {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 20px;
+}
+.back-link {
+  display: inline-block;
+  margin-bottom: 10px;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+.back-link:hover { text-decoration: underline; }
+h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.35; }
+.meta { color: var(--muted); font-size: 14px; display: flex; flex-wrap: wrap; gap: 14px; }
+.thread-list { display: flex; flex-direction: column; gap: 12px; }
+.thread-card {
+  display: block;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.thread-card:hover { border-color: var(--accent); box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08); }
+.thread-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.thread-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.thread-date { font-size: 12px; color: var(--muted); }
+.thread-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.thread-snippet { font-size: 14px; color: #334155; margin-top: 8px; }
+.messages { display: flex; flex-direction: column; gap: 14px; }
+.msg {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
+}
+.msg.lecturer { background: var(--lecturer-bg); border-inline-start: 4px solid var(--lecturer-border); }
+.msg.student { background: var(--student-bg); border-inline-start: 4px solid var(--student-border); }
+.msg-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+}
+.sender { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+.role-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  text-transform: uppercase;
+}
+.msg.student .role-tag { background: #e2e8f0; color: #334155; }
+.msg-date { font-size: 12px; color: var(--muted); }
+.msg-body { font-size: 15px; overflow-wrap: anywhere; }
+.msg-body p:first-child { margin-top: 0; }
+.msg-body p:last-child { margin-bottom: 0; }
+.attachments { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+.attachment-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--badge-bg);
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: all;
+}
+.empty {
+  background: var(--card);
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 32px;
+  text-align: center;
+  color: var(--muted);
+}
+"""
+
+
+def _format_course_label(course_info):
+    cname = (course_info.get("name") or "").strip()
+    ccode = (course_info.get("code") or "").strip()
+    if cname and ccode:
+        return f"{cname} ({ccode})"
+    return cname or ccode
+
+
+def render_thread_html(course_info, thread):
+    """Render a self-contained HTML page for one conversation thread."""
+    course_label = html.escape(_format_course_label(course_info))
+    doctor_label = html.escape(course_info.get("doctor") or "Course Lecturer")
+    subject_label = html.escape(thread.get("subject") or "Conversation")
+
+    msg_blocks = []
+    for m in thread.get("messages", []):
+        role_cls = "lecturer" if m.get("sender_role") == "lecturer" else ("student" if m.get("sender_role") == "student" else "")
+        role_badge = (
+            '<span class="role-tag">Lecturer</span>'
+            if m.get("sender_role") == "lecturer"
+            else ('<span class="role-tag">You</span>' if m.get("sender_role") == "student" else "")
+        )
+        sender_escaped = html.escape(m.get("sender_name") or "Participant")
+        date_escaped = html.escape(m.get("formatted_date") or m.get("created") or "")
+        body_html = m.get("body_html") or f"<p>{html.escape(m.get('body_text') or '')}</p>"
+        att_html = ""
+        if m.get("attachments"):
+            chips = "".join(f'<span class="attachment-badge">📎 {html.escape(a)}</span>' for a in m["attachments"])
+            att_html = f'<div class="attachments">{chips}</div>'
+        msg_blocks.append(
+            f'<article class="msg {role_cls}">'
+            f'<div class="msg-header"><div class="sender" dir="auto">{sender_escaped} {role_badge}</div>'
+            f'<span class="msg-date">{date_escaped}</span></div>'
+            f'<div class="msg-body" dir="auto">{body_html}</div>'
+            f'{att_html}'
+            f'</article>'
+        )
+
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{subject_label} — {course_label}</title>\n"
+        f"<style>{_MESSAGES_HTML_CSS}</style>\n</head>\n<body>\n"
+        '<div class="container">\n'
+        '  <header class="header">\n'
+        '    <a class="back-link" href="index.html">&larr; All Course Messages</a>\n'
+        f'    <h1 dir="auto">{subject_label}</h1>\n'
+        '    <div class="meta">\n'
+        f'      <span dir="auto"><strong>Course:</strong> {course_label}</span>\n'
+        f'      <span dir="auto"><strong>Lecturer:</strong> {doctor_label}</span>\n'
+        f'      <span><strong>Messages:</strong> {len(thread.get("messages", []))}</span>\n'
+        "    </div>\n  </header>\n"
+        '  <main class="messages">\n'
+        + "\n".join(msg_blocks)
+        + "\n  </main>\n</div>\n</body>\n</html>\n"
+    )
+
+
+def render_messages_index_html(course_info, threads):
+    """Render a self-contained HTML index listing all message threads for a course."""
+    course_label = html.escape(_format_course_label(course_info))
+    doctor_label = html.escape(course_info.get("doctor") or "Course Lecturer")
+
+    if not threads:
+        body = '<div class="empty">No lecturer messages found for this course.</div>'
+    else:
+        cards = []
+        for t in threads:
+            msgs = t.get("messages", [])
+            last_msg = msgs[-1] if msgs else {}
+            snippet = re.sub(r"\s+", " ", last_msg.get("body_text") or "").strip()
+            if len(snippet) > 160:
+                snippet = snippet[:157] + "..."
+            participants = []
+            for m in msgs:
+                sn = m.get("sender_name")
+                if sn and sn not in participants:
+                    participants.append(sn)
+            cards.append(
+                f'<a class="thread-card" href="{html.escape(t["filename"])}">'
+                '<div class="thread-top">'
+                f'<span class="thread-title" dir="auto">{html.escape(t["subject"])}</span>'
+                f'<span class="thread-date">{html.escape(t.get("formatted_updated") or "")}</span>'
+                "</div>"
+                f'<div class="thread-sub" dir="auto">{len(msgs)} message(s) &middot; {html.escape(", ".join(participants))}</div>'
+                f'<div class="thread-snippet" dir="auto">{html.escape(snippet)}</div>'
+                "</a>"
+            )
+        body = '<div class="thread-list">\n' + "\n".join(cards) + "\n</div>"
+
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>Messages — {course_label}</title>\n"
+        f"<style>{_MESSAGES_HTML_CSS}</style>\n</head>\n<body>\n"
+        '<div class="container">\n'
+        '  <header class="header">\n'
+        f'    <h1 dir="auto">Course Messages &mdash; {course_label}</h1>\n'
+        '    <div class="meta">\n'
+        f'      <span dir="auto"><strong>Lecturer:</strong> {doctor_label}</span>\n'
+        f'      <span><strong>Conversations:</strong> {len(threads)}</span>\n'
+        "    </div>\n  </header>\n"
+        f"  {body}\n"
+        "</div>\n</body>\n</html>\n"
+    )
+
+
+def check_messages(client, cid, info, state):
+    """Download course message conversations as HTML files under <course_dir>/messages/ when enabled."""
+    if not DOWNLOAD_MESSAGES:
+        return []
+
+    threads = fetch_course_message_threads(client, cid, info)
+    base_dir = info.get("dir") or os.path.join(LMS_STORAGE_DIR, sanitize_filename(info["name"]))
+    msg_dir = os.path.join(base_dir, "messages")
+    index_path = os.path.join(msg_dir, "index.html")
+
+    if threads or os.path.exists(_win_long_path(index_path)):
+        os.makedirs(_win_long_path(msg_dir), exist_ok=True)
+        for thread in threads:
+            thread_path = os.path.join(msg_dir, thread["filename"])
+            with open(_win_long_path(thread_path), "w", encoding="utf-8") as f:
+                f.write(render_thread_html(info, thread))
+        with open(_win_long_path(index_path), "w", encoding="utf-8") as f:
+            f.write(render_messages_index_html(info, threads))
+
+    seen = set(state.get("seen_messages", []))
+    new_messages = []
+    for thread in threads:
+        thread_path = os.path.join(msg_dir, thread["filename"])
+        try:
+            rel_saved = os.path.relpath(thread_path, LMS_STORAGE_DIR)
+        except ValueError:
+            rel_saved = thread_path
+
+        for m in thread["messages"]:
+            msg_key = f"{cid}_{m['id']}"
+            if msg_key in seen:
+                continue
+            seen.add(msg_key)
+            new_messages.append({
+                "course": f"{info['name']} ({info['code']})",
+                "doctor": info["doctor"],
+                "sender": m["sender_name"] or info["doctor"],
+                "subject": thread["subject"],
+                "date": m["formatted_date"],
+                "body": m["body_text"],
+                "attachments": m["attachments"],
+                "saved": rel_saved,
+            })
+
+    state["seen_messages"] = list(seen)
+    return new_messages
+
+
+def check_course_messages(client, state, courses_map=None):
+    """Sync lecturer course messages across all monitored courses when LMS_DOWNLOAD_MESSAGES is enabled."""
+    if not DOWNLOAD_MESSAGES:
+        return []
+
+    courses_dict = courses_map if courses_map is not None else get_courses_map(client)
+    course_items = list(courses_dict.items())
+    if not course_items:
+        return []
+
+    seen_base = list(state.get("seen_messages", []))
+
+    def _run_one(ci):
+        cid, info = ci
+        local_state = {"seen_messages": list(seen_base)}
+        msgs = check_messages(client, cid, info, local_state)
+        return msgs, local_state["seen_messages"]
+
+    results = _parallel_map(_run_one, course_items)
+    all_msgs = []
+    existing = state.setdefault("seen_messages", [])
+    known = set(existing)
+    for msgs, local_seen in results:
+        all_msgs.extend(msgs)
+        for k in local_seen:
+            if k not in known:
+                existing.append(k)
+                known.add(k)
+    return all_msgs
+
+
+_COURSE_LIST_KEYS = ("seen_files", "seen_requests", "seen_links", "seen_announcements", "seen_messages")
 _COURSE_DICT_KEYS = ("seen_files_mtime", "skipped_large", "expanded_zips")
 
 
@@ -2659,6 +3274,7 @@ def main():
 
     all_grades = check_grades(client, state, courses_map=courses_dict)
     all_deadlines = check_deadlines(client, state, courses_map=courses_dict)
+    all_course_messages = check_course_messages(client, state, courses_map=courses_dict)
     save_state(state)
 
     messages = format_update_messages(
@@ -2667,7 +3283,8 @@ def main():
         all_announcements=all_announcements,
         all_grades=all_grades,
         all_deadlines=all_deadlines,
-        all_external_links=all_external_links
+        all_external_links=all_external_links,
+        all_course_messages=all_course_messages,
     )
 
     # Output to stdout and push notifications if updates exist (zero quota / silent otherwise)
@@ -2702,7 +3319,7 @@ def main():
 
 
 
-def format_update_messages(all_downloads, all_new_requests, all_announcements, all_grades, all_deadlines, all_external_links):
+def format_update_messages(all_downloads, all_new_requests, all_announcements, all_grades, all_deadlines, all_external_links, all_course_messages=None):
     messages = []
 
     # 1. New requests alert
@@ -2810,6 +3427,25 @@ def format_update_messages(all_downloads, all_new_requests, all_announcements, a
                 f"*Title*: **{an['title']}**\n"
                 f"{att_line}{links_line}\n"
                 f"{an['body']}"
+            )
+        messages.append("\n\n---\n\n".join(msg_parts))
+
+    # 6. New course messages alert
+    if all_course_messages:
+        msg_parts = ["[Message] **New Course Message**"]
+        for cm in all_course_messages:
+            date_line = f"*Posted*: {cm['date']}\n" if cm.get("date") else ""
+            att_line = ""
+            if cm.get("attachments"):
+                att_line = f"*Attached Files*: {', '.join(cm['attachments'])}\n"
+            saved_line = f"*Saved HTML*: `{cm['saved']}`\n" if cm.get("saved") else ""
+            msg_parts.append(
+                f"*Course*: {cm['course']}\n"
+                f"*Sender*: {cm.get('sender') or cm.get('doctor', '')}\n"
+                f"{date_line}"
+                f"*Subject*: **{cm.get('subject', 'Conversation')}**\n"
+                f"{att_line}{saved_line}\n"
+                f"{cm.get('body', '')}"
             )
         messages.append("\n\n---\n\n".join(msg_parts))
 

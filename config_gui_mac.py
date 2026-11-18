@@ -444,6 +444,7 @@ class _ConfigController(Foundation.NSObject):
 
         courses_str = ",".join(selected_cids)
         keep_ann = "true" if self.state["chk_ann"].state() == AppKit.NSControlStateValueOn else "false"
+        dl_msgs = "true" if self.state["chk_messages"].state() == AppKit.NSControlStateValueOn else "false"
         hermes_msg = "true" if self.state["chk_hermes"].state() == AppKit.NSControlStateValueOn else "false"
         expand_zips = "true" if self.state["chk_expand_zips"].state() == AppKit.NSControlStateValueOn else "false"
         delete_zip = "true" if self.state["chk_delete_zip"].state() == AppKit.NSControlStateValueOn else "false"
@@ -464,6 +465,7 @@ LMS_STORAGE_DIR="{lms_folder}"
 LMS_COURSES="{courses_str}"
 TRAY_THEME="{theme_choice}"
 LMS_KEEP_ALL_ANNOUNCEMENTS="{keep_ann}"
+LMS_DOWNLOAD_MESSAGES="{dl_msgs}"
 LMS_HERMES_MESSAGING="{hermes_msg}"
 LMS_EXPAND_ZIPS="{expand_zips}"
 LMS_DELETE_ORIGINAL_ZIP="{delete_zip}"
@@ -491,6 +493,7 @@ LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
         os.environ["LMS_COURSES"] = courses_str
         os.environ["TRAY_THEME"] = theme_choice
         os.environ["LMS_KEEP_ALL_ANNOUNCEMENTS"] = keep_ann
+        os.environ["LMS_DOWNLOAD_MESSAGES"] = dl_msgs
         os.environ["LMS_HERMES_MESSAGING"] = hermes_msg
         os.environ["LMS_EXPAND_ZIPS"] = expand_zips
         os.environ["LMS_DELETE_ORIGINAL_ZIP"] = delete_zip
@@ -518,7 +521,7 @@ def show_config_dialog_mac(on_saved_callback=None):
         and (has_sso_session or (current_data.get("LMS_USER_ID") and current_data.get("LMS_PASSWORD")))
     )
 
-    win_w, win_h = 580, 688
+    win_w, win_h = 580, 714
     style = (
         AppKit.NSWindowStyleMaskTitled
         | AppKit.NSWindowStyleMaskClosable
@@ -683,7 +686,7 @@ def show_config_dialog_mac(on_saved_callback=None):
     y += card2_h + 12
 
     # Card 3: Sync Options
-    card3_h = 192
+    card3_h = 218
     card3 = _make_box(Foundation.NSMakeRect(pad, y, inner_w, card3_h))
     step1.addSubview_(card3)
     c3_view = FlippedView.alloc().initWithFrame_(Foundation.NSMakeRect(0, 0, inner_w, card3_h))
@@ -696,6 +699,14 @@ def show_config_dialog_mac(on_saved_callback=None):
         checked=current_data.get("LMS_KEEP_ALL_ANNOUNCEMENTS", "false").lower() in ("true", "1", "yes"),
     )
     c3_view.addSubview_(chk_ann)
+    cy += 26
+
+    chk_messages = _make_checkbox(
+        "Download lecturer messages (.html in messages/)",
+        Foundation.NSMakeRect(cx, cy, cw, 22),
+        checked=current_data.get("LMS_DOWNLOAD_MESSAGES", "false").lower() in ("true", "1", "yes"),
+    )
+    c3_view.addSubview_(chk_messages)
     cy += 26
 
     chk_hermes = _make_checkbox(
@@ -864,6 +875,7 @@ def show_config_dialog_mac(on_saved_callback=None):
         "folder_field": folder_field,
         "theme_popup": theme_popup,
         "chk_ann": chk_ann,
+        "chk_messages": chk_messages,
         "chk_hermes": chk_hermes,
         "chk_expand_zips": chk_expand_zips,
         "chk_delete_zip": chk_delete_zip,

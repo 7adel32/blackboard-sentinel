@@ -2,7 +2,7 @@
 
 APP_NAME = "BlackboardSentinel"
 APP_DISPLAY_NAME = "Blackboard Sentinel"
-APP_VERSION = "1.1.13"
+APP_VERSION = "1.1.14"
 GITHUB_REPO = "7adel32/blackboard-sentinel"
 GITHUB_TOKEN = ""
 

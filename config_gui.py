@@ -89,6 +89,7 @@ def load_existing_config():
         "LMS_COURSES": "",
         "TRAY_THEME": "auto",
         "LMS_KEEP_ALL_ANNOUNCEMENTS": "false",
+        "LMS_DOWNLOAD_MESSAGES": "false",
         "LMS_HERMES_MESSAGING": "false",
         "LMS_EXPAND_ZIPS": "false",
         "LMS_DELETE_ORIGINAL_ZIP": "false",
@@ -105,7 +106,9 @@ def load_existing_config():
                         k, v = line.split("=", 1)
                         k = k.strip()
                         v = v.strip().strip("'\"")
-                        if k in data:
+                        if k == "DOWNLOAD_MESSAGES":
+                            data["LMS_DOWNLOAD_MESSAGES"] = v
+                        elif k in data:
                             data[k] = v
                 break
             except Exception:
@@ -126,7 +129,7 @@ def show_config_dialog(on_saved_callback=None, parent=None):
     if not parent:
         _activate_macos_regular_app()
     root.title("Blackboard Sentinel - Setup")
-    root.geometry("560x720")
+    root.geometry("560x748")
     root.minsize(500, 560)
 
     # Use high-contrast app icon for title bar
@@ -277,6 +280,16 @@ def show_config_dialog(on_saved_callback=None, parent=None):
         variable=keep_announcements_var
     )
     chk_ann.pack(anchor="w", pady=(6, 2))
+
+    download_messages_var = tk.BooleanVar(
+        value=current_data.get("LMS_DOWNLOAD_MESSAGES", "false").lower() in ("true", "1", "yes")
+    )
+    chk_messages = ttk.Checkbutton(
+        form1,
+        text="Download lecturer messages (.html in messages/)",
+        variable=download_messages_var
+    )
+    chk_messages.pack(anchor="w", pady=(2, 2))
 
     hermes_var = tk.BooleanVar(
         value=current_data.get("LMS_HERMES_MESSAGING", "false").lower() in ("true", "1", "yes")
@@ -674,6 +687,7 @@ def show_config_dialog(on_saved_callback=None, parent=None):
 
         courses_str = ",".join(selected_cids)
         keep_ann = "true" if keep_announcements_var.get() else "false"
+        dl_msgs = "true" if download_messages_var.get() else "false"
         hermes_msg = "true" if hermes_var.get() else "false"
         expand_zips = "true" if expand_zips_var.get() else "false"
         delete_zip = "true" if delete_zip_var.get() else "false"
@@ -696,6 +710,7 @@ LMS_STORAGE_DIR="{lms_folder}"
 LMS_COURSES="{courses_str}"
 TRAY_THEME="{theme_choice}"
 LMS_KEEP_ALL_ANNOUNCEMENTS="{keep_ann}"
+LMS_DOWNLOAD_MESSAGES="{dl_msgs}"
 LMS_HERMES_MESSAGING="{hermes_msg}"
 LMS_EXPAND_ZIPS="{expand_zips}"
 LMS_DELETE_ORIGINAL_ZIP="{delete_zip}"
@@ -725,6 +740,7 @@ LMS_MAX_FILE_SIZE_MB="{max_mb_str}"
         os.environ["LMS_COURSES"] = courses_str
         os.environ["TRAY_THEME"] = theme_choice
         os.environ["LMS_KEEP_ALL_ANNOUNCEMENTS"] = keep_ann
+        os.environ["LMS_DOWNLOAD_MESSAGES"] = dl_msgs
         os.environ["LMS_HERMES_MESSAGING"] = hermes_msg
         os.environ["LMS_EXPAND_ZIPS"] = expand_zips
         os.environ["LMS_DELETE_ORIGINAL_ZIP"] = delete_zip

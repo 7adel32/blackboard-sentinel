@@ -424,9 +424,12 @@ class SentinelTrayApp:
 
             all_grades = check_lms.check_grades(client, state, courses_map=courses_dict)
             all_deadlines = check_lms.check_deadlines(client, state, courses_map=courses_dict)
+            all_course_messages = check_lms.check_course_messages(client, state, courses_map=courses_dict)
             check_lms.save_state(state)
 
-            has_updates = bool(all_downloads or all_new_requests or all_announcements or all_grades or all_deadlines)
+            has_updates = bool(
+                all_downloads or all_new_requests or all_announcements or all_grades or all_deadlines or all_course_messages
+            )
             self.last_check_time = datetime.now()
 
             if has_updates:
@@ -440,6 +443,7 @@ class SentinelTrayApp:
                     all_grades=all_grades,
                     all_deadlines=all_deadlines,
                     all_external_links=all_external_links,
+                    all_course_messages=all_course_messages,
                 )
 
                 # Compose concise toast summary
@@ -454,6 +458,8 @@ class SentinelTrayApp:
                     summary_parts.append(f"{len(all_deadlines)} upcoming deadline(s)")
                 if all_announcements:
                     summary_parts.append(f"{len(all_announcements)} announcement(s)")
+                if all_course_messages:
+                    summary_parts.append(f"{len(all_course_messages)} new message(s)")
                 summary_text = ", ".join(summary_parts) if summary_parts else "Updates found"
 
                 if messages:
@@ -543,7 +549,7 @@ class SentinelTrayApp:
             update_info = updater.check_for_update()
             if not update_info:
                 if manual and self.is_running:
-                    self._show_info(
+                    self._show_info_dialog(
                         "Blackboard Sentinel Updates",
                         f"Blackboard Sentinel is up to date (v{app_meta.APP_VERSION}).",
                     )
@@ -568,7 +574,7 @@ class SentinelTrayApp:
             err_msg = str(e)
             print(f"[updater] Update check failed: {err_msg}", file=sys.stderr)
             if manual and self.is_running:
-                self._show_info(
+                self._show_info_dialog(
                     "Blackboard Sentinel Updates",
                     f"Unable to check for updates:\n{err_msg}",
                 )

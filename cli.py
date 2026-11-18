@@ -59,9 +59,11 @@ def cmd_status(args):
         "max_file_size_mb": round(check_lms.MAX_FILE_BYTES / 1048576, 2),
         "expand_zips": check_lms.EXPAND_ZIPS,
         "delete_original_zip": check_lms.DELETE_ORIGINAL_ZIP,
+        "download_messages": check_lms.DOWNLOAD_MESSAGES,
         "cached_deadlines": len(cache),
         "tracked_files": len(state.get("seen_files", [])),
         "tracked_grades": len(state.get("seen_grades", {})),
+        "tracked_messages": len(state.get("seen_messages", [])),
     }
     if "--json" in args:
         print(json.dumps(info, indent=2))

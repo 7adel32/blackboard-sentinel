@@ -290,5 +290,154 @@ class TestWindowsIconAndNetwork(unittest.TestCase):
         self.assertNotIn("skipifsilent", non_comment_iss.lower())
 
 
+class TestStorageTargetAndMaterialization(unittest.TestCase):
+    def test_get_courses_map_uses_default_university_storage_even_when_canonical_sibling_exists(self):
+        import check_lms
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_dir = os.path.join(tmp, "Documents")
+            os.makedirs(os.path.join(docs_dir, "AI FUNDAMENTALS"), exist_ok=True)
+            default_storage = os.path.join(docs_dir, "University")
+            os.makedirs(default_storage, exist_ok=True)
+
+            fake_client = mock.MagicMock()
+            fake_client.get_paginated_json.return_value = {"results": [{"courseId": "_c1_1"}]}
+            fake_client.get_json.return_value = {"name": "AI Fundamentals 601 CSC"}
+
+            old_storage = check_lms.LMS_STORAGE_DIR
+            try:
+                check_lms.LMS_STORAGE_DIR = default_storage
+                with mock.patch.dict(os.environ, {"LMS_COURSES": "", "LMS_DOCUMENTS_DIR": ""}, clear=False), \
+                     mock.patch("os.path.expanduser", side_effect=lambda p: docs_dir if p == "~/Documents" else default_storage if p == "~/Documents/University" else p):
+                    cmap = check_lms.get_courses_map(fake_client)
+            finally:
+                check_lms.LMS_STORAGE_DIR = old_storage
+
+            self.assertEqual(
+                cmap["_c1_1"]["dir"],
+                os.path.join(default_storage, "AI Fundamentals 601 CSC"),
+            )
+
+    def test_get_courses_map_honors_explicit_lms_documents_dir(self):
+        import check_lms
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_dir = os.path.join(tmp, "Documents")
+            ai_dir = os.path.join(docs_dir, "AI FUNDAMENTALS")
+            os.makedirs(ai_dir, exist_ok=True)
+            storage_dir = os.path.join(docs_dir, "University")
+            os.makedirs(storage_dir, exist_ok=True)
+
+            fake_client = mock.MagicMock()
+            fake_client.get_paginated_json.return_value = {"results": [{"courseId": "_c1_1"}]}
+            fake_client.get_json.return_value = {"name": "AI Fundamentals 601 CSC"}
+
+            old_storage = check_lms.LMS_STORAGE_DIR
+            try:
+                check_lms.LMS_STORAGE_DIR = storage_dir
+                with mock.patch.dict(os.environ, {"LMS_COURSES": "", "LMS_DOCUMENTS_DIR": docs_dir}, clear=False):
+                    cmap = check_lms.get_courses_map(fake_client)
+            finally:
+                check_lms.LMS_STORAGE_DIR = old_storage
+
+            self.assertEqual(cmap["_c1_1"]["dir"], ai_dir)
+
+    def test_resolve_recorded_zip_path_ignores_stale_path_outside_base_dir(self):
+        import check_lms
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_dir = os.path.join(tmp, "old_root")
+            new_dir = os.path.join(tmp, "new_root")
+            os.makedirs(old_dir, exist_ok=True)
+            os.makedirs(new_dir, exist_ok=True)
+            stale_file = os.path.join(old_dir, "Week1.pdf")
+            with open(stale_file, "wb") as f:
+                f.write(b"old")
+
+            expanded = {"k1": stale_file}
+            self.assertIsNone(check_lms._resolve_recorded_zip_path(expanded, "k1", new_dir))
+            self.assertEqual(check_lms._resolve_recorded_zip_path(expanded, "k1", old_dir), stale_file)
+
+    def test_sync_materializes_missing_files_instructions_and_links_without_duplicate_alerts(self):
+        import check_lms
+
+        with tempfile.TemporaryDirectory() as tmp:
+            course_dir = os.path.join(tmp, "University", "Course 601 CSC")
+            os.makedirs(course_dir, exist_ok=True)
+
+            fake_client = mock.MagicMock()
+
+            def fake_paginated(url):
+                if url.endswith("/contents"):
+                    return {
+                        "results": [
+                            {
+                                "id": "_item_1",
+                                "title": "Assignment 1",
+                                "body": "<p>Submit PDF</p>",
+                                "modified": "2026-11-01T10:00:00.000Z",
+                                "contentHandler": {"id": "resource/x-bb-assignment", "url": "https://example.com/brief"},
+                            }
+                        ]
+                    }
+                if url.endswith("/attachments"):
+                    return {"results": [{"id": "_att_1", "fileName": "brief.pdf"}]}
+                return {"results": []}
+
+            def fake_download(url, dest_path, max_bytes=0, timeout=60):
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                with open(dest_path, "wb") as f:
+                    f.write(b"%PDF-1.4")
+
+            fake_client.get_paginated_json.side_effect = fake_paginated
+            fake_client.download_file.side_effect = fake_download
+
+            state = {
+                "seen_files": ["_c1_1__item_1__att_1_brief.pdf"],
+                "seen_files_mtime": {"_c1_1__item_1__att_1_brief.pdf": "2026-11-01T10:00:00.000Z"},
+                "seen_requests": ["_c1_1__item_1"],
+                "seen_links": ["_c1_1__item_1_https://example.com/brief"],
+                "seen_announcements": [],
+                "seen_grades": {},
+                "skipped_large": {},
+                "expanded_zips": {},
+            }
+            info = {"id": "_c1_1", "code": "601 CSC", "name": "Course 601 CSC", "dir": course_dir, "doctor": "Dr. Test"}
+
+            old_storage = check_lms.LMS_STORAGE_DIR
+            try:
+                check_lms.LMS_STORAGE_DIR = os.path.join(tmp, "University")
+                downloads, new_requests, ext_links = check_lms.check_and_download_course_files(fake_client, "_c1_1", info, state)
+            finally:
+                check_lms.LMS_STORAGE_DIR = old_storage
+
+            req_dir = os.path.join(course_dir, "Assignment 1")
+            self.assertTrue(os.path.isfile(os.path.join(req_dir, "brief.pdf")))
+            self.assertTrue(os.path.isfile(os.path.join(req_dir, "blackboard_instructions.md")))
+            sc_ext = ".webloc" if sys.platform == "darwin" else ".url"
+            self.assertTrue(os.path.isfile(os.path.join(req_dir, f"Assignment 1{sc_ext}")))
+            self.assertEqual(len(downloads), 1)
+            self.assertEqual(new_requests, [])
+            self.assertEqual(ext_links, [])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-specific test")
+    def test_update_worker_uses_show_info_dialog_instead_of_missing_show_info(self):
+        import tray_app
+        import updater
+
+        app = tray_app.SentinelTrayApp()
+        app.is_running = True
+        with mock.patch.object(updater, "check_for_update", return_value=None), \
+             mock.patch.object(app, "_show_info_dialog") as mock_dlg:
+            app._run_update_worker(manual=True)
+            mock_dlg.assert_called_once()
+
+        with mock.patch.object(updater, "check_for_update", side_effect=RuntimeError("boom")), \
+             mock.patch.object(app, "_show_info_dialog") as mock_dlg:
+            app._run_update_worker(manual=True)
+            mock_dlg.assert_called_once()
+            self.assertIn("boom", mock_dlg.call_args.args[1])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2654,16 +2654,68 @@ def _sanitize_html_fragment(raw_html):
     return frag.strip()
 
 
-def _extract_message_attachments(msg_obj, body_html):
-    """Extract attachment filenames from message metadata or embedded HTML without downloading files."""
-    names = []
-    seen = set()
+def _normalize_attachment_url(raw_url):
+    u = html.unescape((raw_url or "").strip())
+    if not u or u.lower().startswith("javascript:"):
+        return ""
+    if u.startswith("/") and LMS_URL:
+        return f"{LMS_URL}{u}"
+    if u.startswith(("http://", "https://", "/")):
+        return u
+    return ""
 
-    def _add(name):
+
+def _strip_inline_attachment_links(frag):
+    """Remove redundant inline attachment anchors and resulting empty wrapper tags from message HTML."""
+    if not frag:
+        return ""
+
+    def _replace_anchor(match):
+        attrs = match.group(1) or ""
+        if (
+            re.search(r'data-bbtype\s*=\s*["\']attachment["\']', attrs, re.IGNORECASE)
+            or re.search(r'data-bbfile\s*=', attrs, re.IGNORECASE)
+            or re.search(r'href\s*=\s*["\'][^"\']*bbcswebdav', attrs, re.IGNORECASE)
+        ):
+            return ""
+        return match.group(0)
+
+    cleaned = re.sub(r"(?is)<a\b([^>]*)>.*?</a>", _replace_anchor, frag)
+    # Remove empty paragraphs/divs/spans left after stripping inline attachment anchors
+    for _ in range(3):
+        prev = cleaned
+        cleaned = re.sub(r"(?is)<(p|div|span)\b[^>]*>(?:\s|<br\s*/?>|&nbsp;)*</\1>", "", cleaned)
+        if cleaned == prev:
+            break
+    # Trim leading/trailing line breaks inside the message container
+    cleaned = re.sub(r"(?is)^(?:\s|<br\s*/?>|&nbsp;)+", "", cleaned)
+    cleaned = re.sub(r"(?is)(?:\s|<br\s*/?>|&nbsp;)+$", "", cleaned)
+    cleaned = re.sub(r'(?is)(<div\b[^>]*>)(?:\s|<br\s*/?>|&nbsp;)+', r"\1", cleaned)
+    cleaned = re.sub(r'(?is)(?:\s|<br\s*/?>|&nbsp;)+(</div>)', r"\1", cleaned)
+    for _ in range(2):
+        cleaned = re.sub(r"(?is)<(p|div|span)\b[^>]*>(?:\s|<br\s*/?>|&nbsp;)*</\1>", "", cleaned)
+    if not clean_html(cleaned) and not re.search(r"(?is)<img\b", cleaned):
+        return ""
+    return cleaned.strip()
+
+
+def _extract_message_attachment_items(msg_obj, body_html):
+    """Extract attachment filenames and optional URLs from metadata or HTML without downloading files."""
+    items = []
+    index_by_name = {}
+
+    def _add(name, url=""):
         cleaned = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", (name or "")).strip()
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            names.append(cleaned)
+        if not cleaned:
+            return
+        norm_url = _normalize_attachment_url(url)
+        key = cleaned.lower()
+        if key in index_by_name:
+            if norm_url and not items[index_by_name[key]]["url"]:
+                items[index_by_name[key]]["url"] = norm_url
+            return
+        index_by_name[key] = len(items)
+        items.append({"name": cleaned, "url": norm_url})
 
     raw_atts = msg_obj.get("attachments") or msg_obj.get("attachment") or []
     if isinstance(raw_atts, dict):
@@ -2671,22 +2723,38 @@ def _extract_message_attachments(msg_obj, body_html):
     if isinstance(raw_atts, list):
         for att in raw_atts:
             if isinstance(att, dict):
-                _add(att.get("fileName") or att.get("displayName") or att.get("name") or att.get("title"))
+                _add(
+                    att.get("fileName") or att.get("displayName") or att.get("name") or att.get("title"),
+                    att.get("resourceUrl") or att.get("downloadUrl") or att.get("url") or att.get("href") or "",
+                )
             elif isinstance(att, str):
                 _add(att)
 
     if body_html:
-        for bf in re.findall(r'data-bbfile=[\x27"]([^\x27"]+)[\x27"]', body_html, re.IGNORECASE):
-            try:
-                obj = json.loads(html.unescape(urllib.parse.unquote(bf)))
-                _add(obj.get("fileName") or obj.get("displayName") or obj.get("linkName"))
-            except Exception:
-                pass
+        for m in re.finditer(r"<a\b([^>]*)>(.*?)</a>", body_html, re.IGNORECASE | re.DOTALL):
+            attrs = m.group(1) or ""
+            href_m = re.search(r'href\s*=\s*[\x27"]([^\x27"]+)[\x27"]', attrs, re.IGNORECASE)
+            href = html.unescape(href_m.group(1).strip()) if href_m else ""
+            bbfile_m = re.search(r'data-bbfile\s*=\s*[\x27"]([^\x27"]+)[\x27"]', attrs, re.IGNORECASE)
+            if bbfile_m:
+                try:
+                    obj = json.loads(html.unescape(urllib.parse.unquote(bbfile_m.group(1))))
+                    _add(
+                        obj.get("fileName") or obj.get("displayName") or obj.get("linkName"),
+                        obj.get("resourceUrl") or obj.get("url") or href,
+                    )
+                except Exception:
+                    pass
         media_atts, _ = parse_announcement_media(body_html)
         for ma in media_atts:
-            _add(ma.get("filename"))
+            _add(ma.get("filename"), ma.get("url") or "")
 
-    return names
+    return items
+
+
+def _extract_message_attachments(msg_obj, body_html):
+    """Extract attachment filenames from message metadata or embedded HTML without downloading files."""
+    return [it["name"] for it in _extract_message_attachment_items(msg_obj, body_html)]
 
 
 def _fetch_course_instructors(client, cid, info):
@@ -2832,10 +2900,11 @@ def fetch_course_message_threads(client, cid, info):
             else:
                 raw_body_html = str(body_obj or "")
 
-            safe_html = _sanitize_html_fragment(raw_body_html)
-            body_text = extract_structured_text(raw_body_html) or clean_html(raw_body_html)
+            safe_html = _strip_inline_attachment_links(_sanitize_html_fragment(raw_body_html))
+            body_text = extract_structured_text(safe_html) or clean_html(safe_html) or extract_structured_text(raw_body_html) or clean_html(raw_body_html)
             created_raw = str(rm.get("postDate") or rm.get("postedDate") or rm.get("created") or "")
-            attachments = _extract_message_attachments(rm, raw_body_html)
+            attachment_items = _extract_message_attachment_items(rm, raw_body_html)
+            attachments = [it["name"] for it in attachment_items]
 
             msgs.append({
                 "id": mid,
@@ -2848,6 +2917,7 @@ def fetch_course_message_threads(client, cid, info):
                 "body_html": safe_html,
                 "body_text": body_text,
                 "attachments": attachments,
+                "attachment_items": attachment_items,
             })
 
         if not msgs:
@@ -2966,15 +3036,27 @@ h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.35; }
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 16px 20px;
+  width: fit-content;
+  min-width: min(100%, 300px);
+  max-width: 82%;
+  align-self: flex-start;
 }
-.msg.lecturer { background: var(--lecturer-bg); border-inline-start: 4px solid var(--lecturer-border); }
-.msg.student { background: var(--student-bg); border-inline-start: 4px solid var(--student-border); }
+.msg.lecturer {
+  align-self: flex-start;
+  background: var(--lecturer-bg);
+  border-left: 4px solid var(--lecturer-border);
+}
+.msg.student {
+  align-self: flex-end;
+  background: var(--student-bg);
+  border-right: 4px solid var(--student-border);
+}
 .msg-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 8px 16px;
   margin-bottom: 10px;
   padding-bottom: 8px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.25);
@@ -2990,11 +3072,12 @@ h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.35; }
   text-transform: uppercase;
 }
 .msg.student .role-tag { background: #e2e8f0; color: #334155; }
-.msg-date { font-size: 12px; color: var(--muted); }
+.msg-date { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .msg-body { font-size: 15px; overflow-wrap: anywhere; }
 .msg-body p:first-child { margin-top: 0; }
 .msg-body p:last-child { margin-bottom: 0; }
-.attachments { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; }
+.msg-body + .attachments { margin-top: 12px; }
 .attachment-badge {
   display: inline-flex;
   align-items: center;
@@ -3005,7 +3088,12 @@ h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.35; }
   color: #334155;
   font-size: 12px;
   font-weight: 600;
-  user-select: all;
+  text-decoration: none;
+}
+a.attachment-badge { cursor: pointer; transition: background-color 0.15s ease, color 0.15s ease; }
+a.attachment-badge:hover { background: #cbd5e1; color: #0f172a; }
+@media (max-width: 640px) {
+  .msg { max-width: 94%; min-width: 0; }
 }
 .empty {
   background: var(--card);
@@ -3042,16 +3130,37 @@ def render_thread_html(course_info, thread):
         )
         sender_escaped = html.escape(m.get("sender_name") or "Participant")
         date_escaped = html.escape(m.get("formatted_date") or m.get("created") or "")
-        body_html = m.get("body_html") or f"<p>{html.escape(m.get('body_text') or '')}</p>"
+        body_html = m.get("body_html")
+        if body_html is None:
+            body_html = ""
+        if not body_html and m.get("body_text") and not m.get("attachments") and not m.get("attachment_items"):
+            body_html = f"<p>{html.escape(m.get('body_text') or '')}</p>"
+        body_block = f'<div class="msg-body" dir="auto">{body_html}</div>' if body_html else ""
+        att_items = m.get("attachment_items")
+        if att_items is None:
+            att_items = [{"name": a, "url": ""} for a in (m.get("attachments") or [])]
         att_html = ""
-        if m.get("attachments"):
-            chips = "".join(f'<span class="attachment-badge">📎 {html.escape(a)}</span>' for a in m["attachments"])
-            att_html = f'<div class="attachments">{chips}</div>'
+        if att_items:
+            chips = []
+            for item in att_items:
+                att_name = html.escape(item.get("name") or "")
+                att_url = item.get("url") or ""
+                if att_url:
+                    chips.append(
+                        f'<a class="attachment-badge" href="{html.escape(att_url)}" target="_blank" rel="noopener noreferrer">'
+                        f"📎 {att_name}</a>"
+                    )
+                else:
+                    chips.append(f'<span class="attachment-badge">📎 {att_name}</span>')
+            att_html = f'<div class="attachments">{"".join(chips)}</div>'
+        sender_html = f'<span dir="auto">{sender_escaped}</span>'
+        if role_badge:
+            sender_html = f"{sender_html} {role_badge}"
         msg_blocks.append(
             f'<article class="msg {role_cls}">'
-            f'<div class="msg-header"><div class="sender" dir="auto">{sender_escaped} {role_badge}</div>'
+            f'<div class="msg-header"><div class="sender">{sender_html}</div>'
             f'<span class="msg-date">{date_escaped}</span></div>'
-            f'<div class="msg-body" dir="auto">{body_html}</div>'
+            f'{body_block}'
             f'{att_html}'
             f'</article>'
         )

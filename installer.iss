@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.14"
+  #define MyAppVersion "1.1.15"
 #endif
 
 #define MyAppName "Blackboard Sentinel"

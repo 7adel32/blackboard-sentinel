@@ -110,7 +110,25 @@ class TestCourseMessagesFeature(unittest.TestCase):
                                 "body": {
                                     "displayText": (
                                         '<p dir="rtl">راجع الملاحظات.</p>'
-                                        '<a data-bbfile="{&quot;fileName&quot;:&quot;rubric.docx&quot;}">rubric.docx</a>'
+                                        '<p><a href="https://lms.example.edu/bbcswebdav/rubric.docx" '
+                                        'data-bbtype="attachment" '
+                                        'data-bbfile="{&quot;fileName&quot;:&quot;rubric.docx&quot;,&quot;resourceUrl&quot;:&quot;https://lms.example.edu/bbcswebdav/rubric.docx&quot;}">'
+                                        'rubric.docx</a></p>'
+                                    )
+                                },
+                            },
+                            {
+                                "id": "_m2b",
+                                "senderId": "_stu_1",
+                                "sender": {"id": "_stu_1", "givenName": "Me"},
+                                "postDate": "2026-11-16T14:00:00.000Z",
+                                "body": {
+                                    "displayText": (
+                                        '<div class="vtbegenerated"><br>'
+                                        '<p><a href="https://lms.example.edu/bbcswebdav/only_file.zip" '
+                                        'data-bbtype="attachment" '
+                                        'data-bbfile="{&quot;fileName&quot;:&quot;only_file.zip&quot;}">'
+                                        'only_file.zip</a></p><br></div>'
                                     )
                                 },
                             },
@@ -140,7 +158,7 @@ class TestCourseMessagesFeature(unittest.TestCase):
                 check_lms.LMS_STORAGE_DIR = os.path.join(tmp, "University")
 
                 alerts = check_lms.check_course_messages(fake_client, state, courses_map={"_c1_1": info})
-                self.assertEqual(len(alerts), 2)
+                self.assertEqual(len(alerts), 3)
                 self.assertEqual({a["sender"] for a in alerts}, {"Me", "Dr. Lecturer"})
 
                 msg_dir = os.path.join(course_dir, "messages")
@@ -153,8 +171,26 @@ class TestCourseMessagesFeature(unittest.TestCase):
 
                 self.assertIn("Hello Doctor, attached is my draft.", thread_html)
                 self.assertIn("راجع الملاحظات.", thread_html)
-                self.assertIn("📎 draft_v1.pdf", thread_html)
-                self.assertIn("📎 rubric.docx", thread_html)
+                self.assertIn('<span class="attachment-badge">📎 draft_v1.pdf</span>', thread_html)
+                self.assertIn(
+                    '<a class="attachment-badge" href="https://lms.example.edu/bbcswebdav/rubric.docx" target="_blank" rel="noopener noreferrer">📎 rubric.docx</a>',
+                    thread_html,
+                )
+                self.assertIn(
+                    '<a class="attachment-badge" href="https://lms.example.edu/bbcswebdav/only_file.zip" target="_blank" rel="noopener noreferrer">📎 only_file.zip</a>',
+                    thread_html,
+                )
+                # Ensure redundant inline attachment anchors were stripped from message bodies
+                self.assertNotIn("data-bbfile", thread_html)
+                self.assertNotIn("data-bbtype", thread_html)
+                self.assertEqual(thread_html.count("📎 rubric.docx"), 1)
+                self.assertEqual(thread_html.count("📎 only_file.zip"), 1)
+                self.assertEqual(thread_html.count('class="attachment-badge"'), 3)
+                # Attachment-only message should have no empty .msg-body wrapper
+                self.assertEqual(thread_html.count('<div class="msg-body"'), 2)
+                # Lecturer aligned left, student ("Me") aligned right
+                self.assertIn(".msg.lecturer {\n  align-self: flex-start;", thread_html)
+                self.assertIn(".msg.student {\n  align-self: flex-end;", thread_html)
                 fake_client.download_file.assert_not_called()
 
                 # Second run should not duplicate alerts, and should re-create deleted HTML
